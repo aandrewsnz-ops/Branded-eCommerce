@@ -1,7 +1,8 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type {
   CustomerAvatarOutput,
-  MassDesiresOutput,
+  MassDesire,
+  MarketingAngle,
   ProductProject,
   ProductProjectInput,
   ResearchInsight,
@@ -178,29 +179,44 @@ export async function fetchLatestCustomerAvatar(
   return (data as CustomerAvatarOutput) ?? null;
 }
 
-/**
- * Fetch the most recent saved mass desires for a project, or null if none
- * exists. Returns null in local-only mode (no Supabase client).
- */
-export async function fetchLatestMassDesires(
+/** Fetch all saved mass desires for a project, ordered by sort_order. */
+export async function fetchMassDesires(
   projectId: string
-): Promise<MassDesiresOutput | null> {
+): Promise<MassDesire[]> {
   if (!supabase) {
-    return null;
+    return [];
   }
 
   const { data, error } = await supabase
-    .from("generated_outputs")
+    .from("mass_desires")
     .select("*")
     .eq("project_id", projectId)
-    .eq("output_type", "mass_desires")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .order("sort_order", { ascending: true });
 
   if (error) {
     throw new Error(error.message);
   }
 
-  return (data as MassDesiresOutput) ?? null;
+  return (data ?? []) as MassDesire[];
+}
+
+/** Fetch all saved marketing angles for a project. */
+export async function fetchMarketingAngles(
+  projectId: string
+): Promise<MarketingAngle[]> {
+  if (!supabase) {
+    return [];
+  }
+
+  const { data, error } = await supabase
+    .from("marketing_angles")
+    .select("*")
+    .eq("project_id", projectId)
+    .order("sort_order", { ascending: true });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data ?? []) as MarketingAngle[];
 }

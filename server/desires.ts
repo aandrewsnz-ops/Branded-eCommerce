@@ -2,9 +2,11 @@ import type {
   ProductProject,
   ResearchInsight,
   CustomerAvatarContent,
-  MassDesire,
+  MassDesireDraft,
   MassDesiresContent,
 } from "../src/types";
+
+export const EXPECTED_DESIRE_COUNT = 5;
 import {
   OPENAI_MODEL,
   ResearchParseError,
@@ -20,7 +22,7 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function normalizeDesire(item: unknown): MassDesire {
+function normalizeDesire(item: unknown): MassDesireDraft {
   const r = asRecord(item);
   return {
     desire_statement: toStringValue(r.desire_statement),
@@ -139,13 +141,6 @@ function buildPrompt(
     "  ]",
     "}",
   ].join("\n");
-}
-
-/** Build a readable plain-text summary for content_text storage. */
-export function desiresToContentText(content: MassDesiresContent): string {
-  return content.mass_desires
-    .map((desire, index) => `${index + 1}. ${desire.desire_statement}`)
-    .join("\n");
 }
 
 /**

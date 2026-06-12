@@ -209,7 +209,8 @@ export interface GenerateAvatarResponse {
   avatar: CustomerAvatarOutput;
 }
 
-export interface MassDesire {
+/** Mass desire fields produced by OpenAI (before DB metadata). */
+export interface MassDesireDraft {
   desire_statement: string;
   audience_segment: string;
   what_they_are_really_buying: string;
@@ -223,24 +224,66 @@ export interface MassDesire {
   compliance_notes: string[];
 }
 
-/** Structured mass desires content stored in generated_outputs.content_json. */
-export interface MassDesiresContent {
-  mass_desires: MassDesire[];
-}
-
-/** A saved generated_outputs row for mass desires. */
-export interface MassDesiresOutput {
+/** A saved row from the mass_desires table. */
+export interface MassDesire extends MassDesireDraft {
   id: string;
   project_id: string;
   run_id: string | null;
-  output_type: "mass_desires";
-  parent_type: string | null;
-  parent_id: string | null;
-  content_json: MassDesiresContent;
-  content_text: string;
+  sort_order: number;
   created_at: string;
 }
 
+/** OpenAI response shape for mass desires generation. */
+export interface MassDesiresContent {
+  mass_desires: MassDesireDraft[];
+}
+
 export interface GenerateDesiresResponse {
-  desires: MassDesiresOutput;
+  desires: MassDesire[];
+}
+
+/** Marketing angle fields produced by OpenAI (before DB metadata). */
+export interface MarketingAngleDraft {
+  angle_name: string;
+  target_audience: string;
+  story_arc: string;
+  beginning_situation: string;
+  crisis_or_realization_moment: string;
+  discovery_moment: string;
+  resolution: string;
+  unique_problem_mechanism: string;
+  unique_solution_mechanism: string;
+  key_emotional_moment: string;
+  real_language_patterns: string[];
+  copy_direction: string;
+  creative_direction: string;
+  compliance_notes: string[];
+}
+
+/** A saved row from the marketing_angles table. */
+export interface MarketingAngle extends MarketingAngleDraft {
+  id: string;
+  project_id: string;
+  mass_desire_id: string;
+  sort_order: number;
+  created_at: string;
+}
+
+export interface MarketingAngleGroup {
+  mass_desire_id: string;
+  desire_statement: string;
+  angles: MarketingAngleDraft[];
+}
+
+export interface MarketingAnglesContent {
+  angle_groups: MarketingAngleGroup[];
+}
+
+export interface MassDesireWithAngles {
+  desire: MassDesire;
+  angles: MarketingAngle[];
+}
+
+export interface GenerateAnglesResponse {
+  desires: MassDesireWithAngles[];
 }

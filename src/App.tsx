@@ -19,7 +19,8 @@ import {
 import {
   fetchLatestCustomerAvatar,
   fetchLatestInsight,
-  fetchLatestMassDesires,
+  fetchMassDesires,
+  fetchMarketingAngles,
   fetchLatestResearchSources,
   fetchProjects,
   insertProject,
@@ -27,10 +28,12 @@ import {
 } from "./lib/supabase";
 import type {
   CustomerAvatarOutput,
+  GenerateAnglesResponse,
   GenerateAvatarResponse,
   GenerateDesiresResponse,
   GenerateInsightResponse,
-  MassDesiresOutput,
+  MarketingAngle,
+  MassDesire,
   ProductProject,
   ProductProjectInput,
   ResearchInsight,
@@ -172,13 +175,20 @@ function App() {
   const [avatarError, setAvatarError] = useState<string | null>(null);
 
   const [desiresByProject, setDesiresByProject] = useState<
-    Record<string, MassDesiresOutput | null>
+    Record<string, MassDesire[]>
+  >({});
+  const [anglesByProject, setAnglesByProject] = useState<
+    Record<string, MarketingAngle[]>
   >({});
   const [desiresLoadingId, setDesiresLoadingId] = useState<string | null>(null);
   const [generatingDesiresId, setGeneratingDesiresId] = useState<string | null>(
     null
   );
   const [desiresError, setDesiresError] = useState<string | null>(null);
+  const [generatingAnglesId, setGeneratingAnglesId] = useState<string | null>(
+    null
+  );
+  const [anglesError, setAnglesError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isSupabaseConfigured) {
@@ -343,7 +353,10 @@ function App() {
     if (!isSupabaseConfigured || !selectedId) {
       return;
     }
-    if (selectedId in desiresByProject) {
+    if (
+      selectedId in desiresByProject &&
+      selectedId in anglesByProject
+    ) {
       return;
     }
 
@@ -352,16 +365,21 @@ function App() {
     const load = async () => {
       setDesiresLoadingId(selectedId);
       setDesiresError(null);
+      setAnglesError(null);
       try {
-        const desires = await fetchLatestMassDesires(selectedId);
+        const [desires, angles] = await Promise.all([
+          fetchMassDesires(selectedId),
+          fetchMarketingAngles(selectedId),
+        ]);
         if (cancelled) return;
         setDesiresByProject((prev) => ({ ...prev, [selectedId]: desires }));
+        setAnglesByProject((prev) => ({ ...prev, [selectedId]: angles }));
       } catch (err: unknown) {
         if (cancelled) return;
         setDesiresError(
           err instanceof Error
-            ? `Failed to load mass desires: ${err.message}`
-            : "Failed to load mass desires."
+            ? `Failed to load workflow data: ${err.message}`
+            : "Failed to load workflow data."
         );
       } finally {
         if (!cancelled) {
@@ -377,7 +395,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedId, desiresByProject]);
+  }, [selectedId, desiresByProject, anglesByProject]);
 
   function updateField<K extends keyof ProductProjectInput>(
     key: K,
@@ -438,6 +456,11 @@ function App() {
 
     if (stage.id === "mass_desires") {
       await handleGenerateDesires(selectedProject.id);
+      return;
+    }
+
+    if (stage.id === "marketing_angles") {
+      await handleGenerateAngles(selectedProject.id);
       return;
     }
 
@@ -581,6 +604,7 @@ function App() {
 
       const data = payload as GenerateDesiresResponse;
       setDesiresByProject((prev) => ({ ...prev, [projectId]: data.desires }));
+      setAnglesByProject((prev) => ({ ...prev, [projectId]: [] }));
       setStatusMessage("Mass desires generated.");
     } catch (err: unknown) {
       setDesiresError(
@@ -588,6 +612,51 @@ function App() {
       );
     } finally {
       setGeneratingDesiresId((current) =>
+        current === projectId ? null : current
+      );
+    }
+  }
+
+  async function handleGenerateAngles(projectId: string) {
+    setStatusMessage(null);
+    setAnglesError(null);
+    setGeneratingAnglesId(projectId);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/angles/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId }),
+      });
+
+      const payload: unknown = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        const message =
+          payload && typeof payload === "object" && "error" in payload
+            ? String((payload as { error: unknown }).error)
+            : `Marketing angles failed (HTTP ${res.status}).`;
+        throw new Error(message);
+      }
+
+      const data = payload as GenerateAnglesResponse;
+      setDesiresByProject((prev) => ({
+        ...prev,
+        [projectId]: data.desires.map((group) => group.desire),
+      }));
+      setAnglesByProject((prev) => ({
+        ...prev,
+        [projectId]: data.desires.flatMap((group) => group.angles),
+      }));
+      setStatusMessage(
+        `Marketing angles generated: ${data.desires.reduce((n, g) => n + g.angles.length, 0)} angles.`
+      );
+    } catch (err: unknown) {
+      setAnglesError(
+        err instanceof Error ? err.message : "Marketing angles failed."
+      );
+    } finally {
+      setGeneratingAnglesId((current) =>
         current === projectId ? null : current
       );
     }
@@ -799,9 +868,12 @@ function App() {
               avatarError={avatarError}
               avatar={avatarByProject[selectedProject.id] ?? null}
               isGeneratingDesires={generatingDesiresId === selectedProject.id}
+              isGeneratingAngles={generatingAnglesId === selectedProject.id}
               isDesiresLoading={desiresLoadingId === selectedProject.id}
               desiresError={desiresError}
-              desires={desiresByProject[selectedProject.id] ?? null}
+              anglesError={anglesError}
+              desires={desiresByProject[selectedProject.id] ?? []}
+              angles={anglesByProject[selectedProject.id] ?? []}
             />
           ) : (
             <div className="empty-state">
@@ -885,9 +957,12 @@ interface ProjectDetailProps {
   avatarError: string | null;
   avatar: CustomerAvatarOutput | null;
   isGeneratingDesires: boolean;
+  isGeneratingAngles: boolean;
   isDesiresLoading: boolean;
   desiresError: string | null;
-  desires: MassDesiresOutput | null;
+  anglesError: string | null;
+  desires: MassDesire[];
+  angles: MarketingAngle[];
 }
 
 function ProjectDetail({
@@ -907,9 +982,12 @@ function ProjectDetail({
   avatarError,
   avatar,
   isGeneratingDesires,
+  isGeneratingAngles,
   isDesiresLoading,
   desiresError,
+  anglesError,
   desires,
+  angles,
 }: ProjectDetailProps) {
   return (
     <div className="detail">
@@ -961,12 +1039,14 @@ function ProjectDetail({
               (stage.id === "research" && isResearching) ||
               (stage.id === "insight_report" && isGeneratingInsight) ||
               (stage.id === "customer_avatar" && isGeneratingAvatar) ||
-              (stage.id === "mass_desires" && isGeneratingDesires);
+              (stage.id === "mass_desires" && isGeneratingDesires) ||
+              (stage.id === "marketing_angles" && isGeneratingAngles);
             const busyLabels: Partial<Record<WorkflowStage["id"], string>> = {
               research: "Running research…",
               insight_report: "Generating insight report…",
               customer_avatar: "Generating customer avatar…",
               mass_desires: "Generating mass desires…",
+              marketing_angles: "Generating marketing angles…",
             };
             const busyLabel = busyLabels[stage.id];
             return (
@@ -1014,10 +1094,13 @@ function ProjectDetail({
       />
 
       <MassDesiresPanel
-        isGenerating={isGeneratingDesires}
+        isGeneratingDesires={isGeneratingDesires}
+        isGeneratingAngles={isGeneratingAngles}
         isLoading={isDesiresLoading}
-        error={desiresError}
+        desiresError={desiresError}
+        anglesError={anglesError}
         desires={desires}
+        angles={angles}
       />
     </div>
   );
@@ -1566,104 +1649,194 @@ function CustomerAvatarPanel({
 }
 
 interface MassDesiresPanelProps {
-  isGenerating: boolean;
+  isGeneratingDesires: boolean;
+  isGeneratingAngles: boolean;
   isLoading: boolean;
-  error: string | null;
-  desires: MassDesiresOutput | null;
+  desiresError: string | null;
+  anglesError: string | null;
+  desires: MassDesire[];
+  angles: MarketingAngle[];
 }
 
 function MassDesiresPanel({
-  isGenerating,
+  isGeneratingDesires,
+  isGeneratingAngles,
   isLoading,
-  error,
+  desiresError,
+  anglesError,
   desires,
+  angles,
 }: MassDesiresPanelProps) {
-  const hasContent = isGenerating || isLoading || error || desires;
+  const hasContent =
+    isGeneratingDesires ||
+    isGeneratingAngles ||
+    isLoading ||
+    desiresError ||
+    anglesError ||
+    desires.length > 0;
+
   if (!hasContent) {
     return null;
   }
 
-  const items = desires?.content_json.mass_desires ?? [];
+  const totalAngles = angles.length;
 
   return (
     <div className="insight desires-panel">
       <div className="research-head">
-        <h3 className="workflow-title">Mass desires</h3>
-        {desires ? (
-          <span className="insight-date">
-            {new Date(desires.created_at).toLocaleString()}
-          </span>
+        <h3 className="workflow-title">Mass desires &amp; marketing angles</h3>
+        {desires.length > 0 ? (
+          <span className="count-badge">{desires.length} desires</span>
         ) : null}
-        {items.length > 0 ? (
-          <span className="count-badge">{items.length}</span>
+        {totalAngles > 0 ? (
+          <span className="count-badge">{totalAngles} angles</span>
         ) : null}
       </div>
 
-      {error ? (
+      {desiresError ? (
         <div className="banner banner-error" role="alert">
           <AlertTriangle size={16} />
-          <span>{error}</span>
+          <span>{desiresError}</span>
         </div>
       ) : null}
 
-      {isGenerating ? (
+      {anglesError ? (
+        <div className="banner banner-error" role="alert">
+          <AlertTriangle size={16} />
+          <span>{anglesError}</span>
+        </div>
+      ) : null}
+
+      {isGeneratingDesires ? (
         <div className="list-state">
           <Loader2 size={16} strokeWidth={2} className="spin" />
           <span>Generating mass desires… this can take a minute.</span>
         </div>
-      ) : isLoading ? (
+      ) : null}
+
+      {isGeneratingAngles ? (
         <div className="list-state">
           <Loader2 size={16} strokeWidth={2} className="spin" />
-          <span>Loading mass desires…</span>
+          <span>Generating marketing angles… this can take a few minutes.</span>
         </div>
       ) : null}
 
-      {!isGenerating && items.length > 0 ? (
+      {isLoading ? (
+        <div className="list-state">
+          <Loader2 size={16} strokeWidth={2} className="spin" />
+          <span>Loading mass desires and marketing angles…</span>
+        </div>
+      ) : null}
+
+      {!isGeneratingDesires && desires.length > 0 ? (
         <div className="source-list">
-          {items.map((desire, index) => (
-            <article key={index} className="source-card desire-card">
-              <header className="source-card-head">
-                <h4 className="source-title">{desire.desire_statement}</h4>
-                <span className="stage-index">{index + 1}</span>
-              </header>
+          {desires.map((desire, index) => {
+            const desireAngles = angles
+              .filter((angle) => angle.mass_desire_id === desire.id)
+              .sort((a, b) => a.sort_order - b.sort_order);
 
-              {desire.audience_segment ? (
-                <span className="meta-chip meta-chip-theme">
-                  {desire.audience_segment}
-                </span>
-              ) : null}
+            return (
+              <article key={desire.id} className="source-card desire-card">
+                <header className="source-card-head">
+                  <h4 className="source-title">{desire.desire_statement}</h4>
+                  <span className="stage-index">{index + 1}</span>
+                </header>
 
-              <p className="insight-text">
-                <strong>Emotional driver:</strong> {desire.emotional_driver}
-              </p>
-              <p className="insight-text">
-                <strong>What they are really buying:</strong>{" "}
-                {desire.what_they_are_really_buying}
-              </p>
-              <p className="insight-text">
-                <strong>Pain it moves away from:</strong>{" "}
-                {desire.pain_it_moves_away_from}
-              </p>
-              <p className="insight-text">
-                <strong>Positive outcome it moves toward:</strong>{" "}
-                {desire.positive_outcome_it_moves_toward}
-              </p>
-              <p className="insight-text">
-                <strong>Copy direction:</strong> {desire.copy_direction}
-              </p>
-              <p className="insight-text">
-                <strong>Messaging to avoid:</strong> {desire.messaging_to_avoid}
-              </p>
+                {desire.audience_segment ? (
+                  <span className="meta-chip meta-chip-theme">
+                    {desire.audience_segment}
+                  </span>
+                ) : null}
 
-              {desire.compliance_notes.length > 0 ? (
-                <ul className="bullet-list">
-                  {desire.compliance_notes.map((note, i) => (
-                    <li key={i}>{note}</li>
-                  ))}
-                </ul>
-              ) : null}
-            </article>
-          ))}
+                <p className="insight-text">
+                  <strong>Emotional driver:</strong> {desire.emotional_driver}
+                </p>
+                <p className="insight-text">
+                  <strong>What they are really buying:</strong>{" "}
+                  {desire.what_they_are_really_buying}
+                </p>
+                <p className="insight-text">
+                  <strong>Pain it moves away from:</strong>{" "}
+                  {desire.pain_it_moves_away_from}
+                </p>
+                <p className="insight-text">
+                  <strong>Positive outcome it moves toward:</strong>{" "}
+                  {desire.positive_outcome_it_moves_toward}
+                </p>
+                <p className="insight-text">
+                  <strong>Copy direction:</strong> {desire.copy_direction}
+                </p>
+                <p className="insight-text">
+                  <strong>Messaging to avoid:</strong>{" "}
+                  {desire.messaging_to_avoid}
+                </p>
+
+                {desire.compliance_notes.length > 0 ? (
+                  <ul className="bullet-list">
+                    {desire.compliance_notes.map((note, i) => (
+                      <li key={i}>{note}</li>
+                    ))}
+                  </ul>
+                ) : null}
+
+                {desireAngles.length > 0 ? (
+                  <div className="angle-list">
+                    <h5 className="angle-list-title">
+                      Marketing angles ({desireAngles.length})
+                    </h5>
+                    {desireAngles.map((angle) => (
+                      <div key={angle.id} className="angle-card">
+                        <header className="angle-card-head">
+                          <h6 className="angle-name">{angle.angle_name}</h6>
+                          <span className="stage-index">
+                            {angle.sort_order + 1}
+                          </span>
+                        </header>
+                        <p className="insight-text">
+                          <strong>Target audience:</strong>{" "}
+                          {angle.target_audience}
+                        </p>
+                        <p className="insight-text">
+                          <strong>Story arc:</strong> {angle.story_arc}
+                        </p>
+                        <p className="insight-text">
+                          <strong>Crisis / realization:</strong>{" "}
+                          {angle.crisis_or_realization_moment}
+                        </p>
+                        <p className="insight-text">
+                          <strong>Unique problem mechanism:</strong>{" "}
+                          {angle.unique_problem_mechanism}
+                        </p>
+                        <p className="insight-text">
+                          <strong>Unique solution mechanism:</strong>{" "}
+                          {angle.unique_solution_mechanism}
+                        </p>
+                        <p className="insight-text">
+                          <strong>Key emotional moment:</strong>{" "}
+                          {angle.key_emotional_moment}
+                        </p>
+                        <p className="insight-text">
+                          <strong>Copy direction:</strong>{" "}
+                          {angle.copy_direction}
+                        </p>
+                        <p className="insight-text">
+                          <strong>Creative direction:</strong>{" "}
+                          {angle.creative_direction}
+                        </p>
+                        {angle.compliance_notes.length > 0 ? (
+                          <ul className="bullet-list">
+                            {angle.compliance_notes.map((note, i) => (
+                              <li key={i}>{note}</li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </article>
+            );
+          })}
         </div>
       ) : null}
     </div>

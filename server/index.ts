@@ -16,10 +16,19 @@ import {
   generateCustomerAvatar,
   avatarToContentText,
 } from "./avatar";
-import { generateMassDesires, desiresToContentText } from "./desires";
+import {
+  generateMassDesires,
+  EXPECTED_DESIRE_COUNT,
+} from "./desires";
+import {
+  generateMarketingAngles,
+  EXPECTED_ANGLES_PER_DESIRE,
+} from "./angles";
 import type {
   CustomerAvatarOutput,
-  MassDesiresOutput,
+  MassDesire,
+  MassDesireWithAngles,
+  MarketingAngle,
   ProductProject,
   ResearchInsight,
   ResearchRun,
@@ -503,29 +512,253 @@ app.post("/api/desires/generate", async (req, res) => {
     return res.status(502).json({ error: message });
   }
 
-  const { data: insertedData, error: insertError } = await supabase
-    .from("generated_outputs")
-    .insert({
-      project_id: project.id,
-      run_id: insight.run_id ?? null,
-      output_type: "mass_desires",
-      parent_type: "customer_avatar",
-      parent_id: avatarOutput.id,
-      content_json: desiresContent,
-      content_text: desiresToContentText(desiresContent),
-    })
-    .select()
-    .single();
-
-  if (insertError || !insertedData) {
-    return res.status(500).json({
-      error: `Failed to save mass desires: ${insertError?.message ?? "unknown error"}`,
+  if (desiresContent.mass_desires.length !== EXPECTED_DESIRE_COUNT) {
+    return res.status(502).json({
+      error: `Expected exactly ${EXPECTED_DESIRE_COUNT} mass desires, got ${desiresContent.mass_desires.length}.`,
     });
   }
 
-  const desires = insertedData as MassDesiresOutput;
+  const { error: deleteAnglesError } = await supabase
+    .from("marketing_angles")
+    .delete()
+    .eq("project_id", project.id);
 
-  return res.json({ desires });
+  if (deleteAnglesError) {
+    return res.status(500).json({
+      error: `Failed to clear old marketing angles: ${deleteAnglesError.message}`,
+    });
+  }
+
+  const { error: deleteDesiresError } = await supabase
+    .from("mass_desires")
+    .delete()
+    .eq("project_id", project.id);
+
+  if (deleteDesiresError) {
+    return res.status(500).json({
+      error: `Failed to clear old mass desires: ${deleteDesiresError.message}`,
+    });
+  }
+
+  const desireRows = desiresContent.mass_desires.map((draft, index) => ({
+    project_id: project.id,
+    run_id: insight.run_id ?? null,
+    sort_order: index,
+    desire_statement: draft.desire_statement,
+    audience_segment: draft.audience_segment,
+    what_they_are_really_buying: draft.what_they_are_really_buying,
+    emotional_driver: draft.emotional_driver,
+    life_context: draft.life_context,
+    pain_it_moves_away_from: draft.pain_it_moves_away_from,
+    positive_outcome_it_moves_toward: draft.positive_outcome_it_moves_toward,
+    why_this_desire_is_distinct: draft.why_this_desire_is_distinct,
+    copy_direction: draft.copy_direction,
+    messaging_to_avoid: draft.messaging_to_avoid,
+    compliance_notes: draft.compliance_notes,
+  }));
+
+  const { data: insertedDesires, error: insertDesiresError } = await supabase
+    .from("mass_desires")
+    .insert(desireRows)
+    .select()
+    .order("sort_order", { ascending: true });
+
+  if (insertDesiresError || !insertedDesires) {
+    return res.status(500).json({
+      error: `Failed to save mass desires: ${insertDesiresError?.message ?? "unknown error"}`,
+    });
+  }
+
+  return res.json({ desires: insertedDesires as MassDesire[] });
+});
+
+app.post("/api/angles/generate", async (req, res) => {
+  const projectId = (req.body as { projectId?: unknown })?.projectId;
+
+  if (typeof projectId !== "string" || projectId.trim().length === 0) {
+    return res.status(400).json({ error: "Missing or invalid 'projectId'." });
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    return res
+      .status(500)
+      .json({ error: "OPENAI_API_KEY is not set on the backend (.env.local)." });
+  }
+
+  let supabase: ReturnType<typeof getSupabase>;
+  try {
+    supabase = getSupabase();
+  } catch (error: unknown) {
+    return res.status(500).json({ error: errorMessage(error) });
+  }
+
+  const { data: projectData, error: projectError } = await supabase
+    .from("projects")
+    .select("*")
+    .eq("id", projectId)
+    .single();
+
+  if (projectError || !projectData) {
+    return res.status(404).json({
+      error: `Project not found: ${projectError?.message ?? projectId}`,
+    });
+  }
+
+  const project = projectData as ProductProject;
+
+  const { data: insightData, error: insightError } = await supabase
+    .from("research_insights")
+    .select("*")
+    .eq("project_id", project.id)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (insightError) {
+    return res.status(500).json({
+      error: `Failed to load insight report: ${insightError.message}`,
+    });
+  }
+
+  if (!insightData) {
+    return res.status(400).json({
+      error:
+        "No insight report found. Please run Generate Insight Report first.",
+    });
+  }
+
+  const insight = insightData as ResearchInsight;
+
+  const { data: avatarData, error: avatarError } = await supabase
+    .from("generated_outputs")
+    .select("*")
+    .eq("project_id", project.id)
+    .eq("output_type", "customer_avatar")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (avatarError) {
+    return res.status(500).json({
+      error: `Failed to load customer avatar: ${avatarError.message}`,
+    });
+  }
+
+  if (!avatarData) {
+    return res.status(400).json({
+      error:
+        "No customer avatar found. Please run Generate Customer Avatar first.",
+    });
+  }
+
+  const avatarOutput = avatarData as CustomerAvatarOutput;
+
+  const { data: massDesiresData, error: massDesiresError } = await supabase
+    .from("mass_desires")
+    .select("*")
+    .eq("project_id", project.id)
+    .order("sort_order", { ascending: true });
+
+  if (massDesiresError) {
+    return res.status(500).json({
+      error: `Failed to load mass desires: ${massDesiresError.message}`,
+    });
+  }
+
+  const massDesires = (massDesiresData ?? []) as MassDesire[];
+
+  if (massDesires.length === 0) {
+    return res.status(400).json({
+      error: "No mass desires found. Please run Generate Mass Desires first.",
+    });
+  }
+
+  let anglesContent;
+  try {
+    anglesContent = await generateMarketingAngles(
+      project,
+      insight,
+      avatarOutput.content_json,
+      massDesires
+    );
+  } catch (error: unknown) {
+    const message = errorMessage(error);
+    if (error instanceof ResearchParseError) {
+      return res.status(502).json({ error: message, raw: error.rawText });
+    }
+    return res.status(502).json({ error: message });
+  }
+
+  const expectedTotal =
+    massDesires.length * EXPECTED_ANGLES_PER_DESIRE;
+  const actualTotal = anglesContent.angle_groups.reduce(
+    (sum, group) => sum + group.angles.length,
+    0
+  );
+
+  if (actualTotal !== expectedTotal) {
+    return res.status(502).json({
+      error: `Expected ${expectedTotal} marketing angles (${massDesires.length} desires × ${EXPECTED_ANGLES_PER_DESIRE}), got ${actualTotal}.`,
+    });
+  }
+
+  const { error: deleteAnglesError } = await supabase
+    .from("marketing_angles")
+    .delete()
+    .eq("project_id", project.id);
+
+  if (deleteAnglesError) {
+    return res.status(500).json({
+      error: `Failed to clear old marketing angles: ${deleteAnglesError.message}`,
+    });
+  }
+
+  const angleRows: Record<string, unknown>[] = [];
+  for (const group of anglesContent.angle_groups) {
+    group.angles.forEach((angle, index) => {
+      angleRows.push({
+        project_id: project.id,
+        mass_desire_id: group.mass_desire_id,
+        sort_order: index,
+        angle_name: angle.angle_name,
+        target_audience: angle.target_audience,
+        story_arc: angle.story_arc,
+        beginning_situation: angle.beginning_situation,
+        crisis_or_realization_moment: angle.crisis_or_realization_moment,
+        discovery_moment: angle.discovery_moment,
+        resolution: angle.resolution,
+        unique_problem_mechanism: angle.unique_problem_mechanism,
+        unique_solution_mechanism: angle.unique_solution_mechanism,
+        key_emotional_moment: angle.key_emotional_moment,
+        real_language_patterns: angle.real_language_patterns,
+        copy_direction: angle.copy_direction,
+        creative_direction: angle.creative_direction,
+        compliance_notes: angle.compliance_notes,
+      });
+    });
+  }
+
+  const { data: insertedAngles, error: insertAnglesError } = await supabase
+    .from("marketing_angles")
+    .insert(angleRows)
+    .select();
+
+  if (insertAnglesError || !insertedAngles) {
+    return res.status(500).json({
+      error: `Failed to save marketing angles: ${insertAnglesError?.message ?? "unknown error"}`,
+    });
+  }
+
+  const savedAngles = insertedAngles as MarketingAngle[];
+
+  const grouped: MassDesireWithAngles[] = massDesires.map((desire) => ({
+    desire,
+    angles: savedAngles
+      .filter((angle) => angle.mass_desire_id === desire.id)
+      .sort((a, b) => a.sort_order - b.sort_order),
+  }));
+
+  return res.json({ desires: grouped });
 });
 
 app.listen(PORT, () => {
