@@ -1,5 +1,10 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import type { ProductProject, ProductProjectInput } from "../types";
+import type {
+  ProductProject,
+  ProductProjectInput,
+  ResearchInsight,
+  ResearchSource,
+} from "../types";
 
 /**
  * Supabase client for project persistence.
@@ -71,4 +76,75 @@ export async function insertProject(
   }
 
   return data as ProductProject;
+}
+
+/**
+ * Fetch the saved research sources for a project's latest completed research
+ * run (stage = "research"). Returns an empty array if there is no completed run
+ * or no sources, and in local-only mode (no Supabase client).
+ */
+export async function fetchLatestResearchSources(
+  projectId: string
+): Promise<ResearchSource[]> {
+  if (!supabase) {
+    return [];
+  }
+
+  const { data: runData, error: runError } = await supabase
+    .from("research_runs")
+    .select("id")
+    .eq("project_id", projectId)
+    .eq("stage", "research")
+    .eq("status", "completed")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (runError) {
+    throw new Error(runError.message);
+  }
+
+  if (!runData) {
+    return [];
+  }
+
+  const runId = (runData as { id: string }).id;
+
+  const { data, error } = await supabase
+    .from("research_sources")
+    .select("*")
+    .eq("run_id", runId)
+    .order("relevance_score", { ascending: false });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data ?? []) as ResearchSource[];
+}
+
+/**
+ * Fetch the most recent saved insight report for a project, or null if none
+ * exists. Returns null in local-only mode (no Supabase client).
+ */
+export async function fetchLatestInsight(
+  projectId: string
+): Promise<ResearchInsight | null> {
+  if (!supabase) {
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from("research_insights")
+    .select("*")
+    .eq("project_id", projectId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data as ResearchInsight) ?? null;
 }

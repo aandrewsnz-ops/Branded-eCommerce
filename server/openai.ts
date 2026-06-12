@@ -20,7 +20,7 @@ export class ResearchParseError extends Error {
   }
 }
 
-function getOpenAI(): OpenAI {
+export function getOpenAI(): OpenAI {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     throw new Error(
@@ -85,7 +85,7 @@ function buildPrompt(project: ProductProject): string {
 }
 
 /** Pull a JSON object out of a model response that may be wrapped in prose/fences. */
-function extractJson(text: string): unknown {
+export function extractJson(text: string): unknown {
   let candidate = text.trim();
 
   const fenced = candidate.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -102,11 +102,11 @@ function extractJson(text: string): unknown {
   return JSON.parse(candidate);
 }
 
-function toStringValue(value: unknown): string {
+export function toStringValue(value: unknown): string {
   return typeof value === "string" ? value : value == null ? "" : String(value);
 }
 
-function toStringArray(value: unknown): string[] {
+export function toStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.map(toStringValue).filter((item) => item.trim().length > 0);
 }

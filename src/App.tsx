@@ -17,13 +17,17 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import {
+  fetchLatestInsight,
+  fetchLatestResearchSources,
   fetchProjects,
   insertProject,
   isSupabaseConfigured,
 } from "./lib/supabase";
 import type {
+  GenerateInsightResponse,
   ProductProject,
   ProductProjectInput,
+  ResearchInsight,
   ResearchSource,
   RunResearchResponse,
   WorkflowStage,
@@ -140,6 +144,17 @@ function App() {
   >({});
   const [researchingId, setResearchingId] = useState<string | null>(null);
   const [researchError, setResearchError] = useState<string | null>(null);
+  const [sourcesLoadingId, setSourcesLoadingId] = useState<string | null>(null);
+
+  // Insight reports + status, keyed by project id. `undefined` = not yet loaded.
+  const [insightByProject, setInsightByProject] = useState<
+    Record<string, ResearchInsight | null>
+  >({});
+  const [insightLoadingId, setInsightLoadingId] = useState<string | null>(null);
+  const [generatingInsightId, setGeneratingInsightId] = useState<string | null>(
+    null
+  );
+  const [insightError, setInsightError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isSupabaseConfigured) {
@@ -174,6 +189,91 @@ function App() {
 
   const selectedProject =
     projects.find((project) => project.id === selectedId) ?? null;
+
+  // Hydrate saved research sources for the selected project so they survive a
+  // page refresh. Cached per project (the key existing means already loaded or
+  // freshly generated), so we never refetch and never clobber new results.
+  useEffect(() => {
+    if (!isSupabaseConfigured || !selectedId) {
+      return;
+    }
+    if (selectedId in researchByProject) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const load = async () => {
+      setSourcesLoadingId(selectedId);
+      setResearchError(null);
+      try {
+        const sources = await fetchLatestResearchSources(selectedId);
+        if (cancelled) return;
+        setResearchByProject((prev) => ({ ...prev, [selectedId]: sources }));
+      } catch (err: unknown) {
+        if (cancelled) return;
+        setResearchError(
+          err instanceof Error
+            ? `Failed to load research sources: ${err.message}`
+            : "Failed to load research sources."
+        );
+      } finally {
+        if (!cancelled) {
+          setSourcesLoadingId((current) =>
+            current === selectedId ? null : current
+          );
+        }
+      }
+    };
+
+    void load();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId, researchByProject]);
+
+  // Load the latest persisted insight report for the selected project so it
+  // survives a page refresh. Cached per project so we only fetch once.
+  useEffect(() => {
+    if (!isSupabaseConfigured || !selectedId) {
+      return;
+    }
+    if (selectedId in insightByProject) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const load = async () => {
+      setInsightLoadingId(selectedId);
+      setInsightError(null);
+      try {
+        const insight = await fetchLatestInsight(selectedId);
+        if (cancelled) return;
+        setInsightByProject((prev) => ({ ...prev, [selectedId]: insight }));
+      } catch (err: unknown) {
+        if (cancelled) return;
+        setInsightError(
+          err instanceof Error
+            ? `Failed to load insight report: ${err.message}`
+            : "Failed to load insight report."
+        );
+      } finally {
+        if (!cancelled) {
+          setInsightLoadingId((current) =>
+            current === selectedId ? null : current
+          );
+        }
+      }
+    };
+
+    void load();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId, insightByProject]);
 
   function updateField<K extends keyof ProductProjectInput>(
     key: K,
@@ -218,13 +318,18 @@ function App() {
   }
 
   async function handleRunStage(stage: WorkflowStage) {
-    // Only "Run Research" is wired to the backend; other stages stay placeholders.
-    if (stage.id !== "research") {
-      setStatusMessage(`${stage.label} coming next`);
+    if (!selectedProject) {
       return;
     }
 
-    if (!selectedProject) {
+    if (stage.id === "insight_report") {
+      await handleGenerateInsight(selectedProject.id);
+      return;
+    }
+
+    // Only "Run Research" / insight are wired; other stages stay placeholders.
+    if (stage.id !== "research") {
+      setStatusMessage(`${stage.label} coming next`);
       return;
     }
 
@@ -264,6 +369,42 @@ function App() {
       );
     } finally {
       setResearchingId((current) => (current === projectId ? null : current));
+    }
+  }
+
+  async function handleGenerateInsight(projectId: string) {
+    setStatusMessage(null);
+    setInsightError(null);
+    setGeneratingInsightId(projectId);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/insights/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId }),
+      });
+
+      const payload: unknown = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        const message =
+          payload && typeof payload === "object" && "error" in payload
+            ? String((payload as { error: unknown }).error)
+            : `Insight report failed (HTTP ${res.status}).`;
+        throw new Error(message);
+      }
+
+      const data = payload as GenerateInsightResponse;
+      setInsightByProject((prev) => ({ ...prev, [projectId]: data.insight }));
+      setStatusMessage("Insight report generated.");
+    } catch (err: unknown) {
+      setInsightError(
+        err instanceof Error ? err.message : "Insight report failed."
+      );
+    } finally {
+      setGeneratingInsightId((current) =>
+        current === projectId ? null : current
+      );
     }
   }
 
@@ -461,8 +602,13 @@ function App() {
               statusMessage={statusMessage}
               onRunStage={handleRunStage}
               isResearching={researchingId === selectedProject.id}
+              isSourcesLoading={sourcesLoadingId === selectedProject.id}
               researchError={researchError}
               researchSources={researchByProject[selectedProject.id] ?? []}
+              isGeneratingInsight={generatingInsightId === selectedProject.id}
+              isInsightLoading={insightLoadingId === selectedProject.id}
+              insightError={insightError}
+              insight={insightByProject[selectedProject.id] ?? null}
             />
           ) : (
             <div className="empty-state">
@@ -534,8 +680,13 @@ interface ProjectDetailProps {
   statusMessage: string | null;
   onRunStage: (stage: WorkflowStage) => void;
   isResearching: boolean;
+  isSourcesLoading: boolean;
   researchError: string | null;
   researchSources: ResearchSource[];
+  isGeneratingInsight: boolean;
+  isInsightLoading: boolean;
+  insightError: string | null;
+  insight: ResearchInsight | null;
 }
 
 function ProjectDetail({
@@ -543,8 +694,13 @@ function ProjectDetail({
   statusMessage,
   onRunStage,
   isResearching,
+  isSourcesLoading,
   researchError,
   researchSources,
+  isGeneratingInsight,
+  isInsightLoading,
+  insightError,
+  insight,
 }: ProjectDetailProps) {
   return (
     <div className="detail">
@@ -591,9 +747,14 @@ function ProjectDetail({
         </div>
         <div className="workflow-grid">
           {WORKFLOW_STAGES.map((stage, index) => {
-            const isResearchStage = stage.id === "research";
             const Icon = STAGE_ICONS[stage.id];
-            const busy = isResearchStage && isResearching;
+            const busy =
+              (stage.id === "research" && isResearching) ||
+              (stage.id === "insight_report" && isGeneratingInsight);
+            const busyLabel =
+              stage.id === "research"
+                ? "Running research…"
+                : "Generating insight report…";
             return (
               <button
                 key={stage.id}
@@ -609,7 +770,7 @@ function ProjectDetail({
                   <Icon size={16} strokeWidth={2} />
                 )}
                 <span className="stage-label">
-                  {busy ? "Running research…" : stage.label}
+                  {busy ? busyLabel : stage.label}
                 </span>
               </button>
             );
@@ -619,8 +780,16 @@ function ProjectDetail({
 
       <ResearchResults
         isResearching={isResearching}
+        isLoading={isSourcesLoading}
         researchError={researchError}
         sources={researchSources}
+      />
+
+      <InsightReport
+        isGenerating={isGeneratingInsight}
+        isLoading={isInsightLoading}
+        error={insightError}
+        insight={insight}
       />
     </div>
   );
@@ -628,19 +797,19 @@ function ProjectDetail({
 
 interface ResearchResultsProps {
   isResearching: boolean;
+  isLoading: boolean;
   researchError: string | null;
   sources: ResearchSource[];
 }
 
 function ResearchResults({
   isResearching,
+  isLoading,
   researchError,
   sources,
 }: ResearchResultsProps) {
-  const hasContent = isResearching || researchError || sources.length > 0;
-  if (!hasContent) {
-    return null;
-  }
+  const showEmptyState =
+    !isResearching && !isLoading && !researchError && sources.length === 0;
 
   return (
     <div className="research">
@@ -662,6 +831,19 @@ function ResearchResults({
         <div className="list-state">
           <Loader2 size={16} strokeWidth={2} className="spin" />
           <span>Searching public discussions… this can take a minute.</span>
+        </div>
+      ) : null}
+
+      {isLoading ? (
+        <div className="list-state">
+          <Loader2 size={16} strokeWidth={2} className="spin" />
+          <span>Loading saved research sources…</span>
+        </div>
+      ) : null}
+
+      {showEmptyState ? (
+        <div className="list-state">
+          No research sources yet. Click “Run Research” to gather them.
         </div>
       ) : null}
 
@@ -712,6 +894,181 @@ function ResearchResults({
         ))}
       </div>
     </div>
+  );
+}
+
+interface InsightReportProps {
+  isGenerating: boolean;
+  isLoading: boolean;
+  error: string | null;
+  insight: ResearchInsight | null;
+}
+
+function InsightReport({
+  isGenerating,
+  isLoading,
+  error,
+  insight,
+}: InsightReportProps) {
+  const hasContent = isGenerating || isLoading || error || insight;
+  if (!hasContent) {
+    return null;
+  }
+
+  return (
+    <div className="insight">
+      <div className="research-head">
+        <h3 className="workflow-title">Insight report</h3>
+        {insight ? (
+          <span className="insight-date">
+            {new Date(insight.created_at).toLocaleString()}
+          </span>
+        ) : null}
+      </div>
+
+      {error ? (
+        <div className="banner banner-error" role="alert">
+          <AlertTriangle size={16} />
+          <span>{error}</span>
+        </div>
+      ) : null}
+
+      {isGenerating ? (
+        <div className="list-state">
+          <Loader2 size={16} strokeWidth={2} className="spin" />
+          <span>Generating insight report… this can take a minute.</span>
+        </div>
+      ) : isLoading ? (
+        <div className="list-state">
+          <Loader2 size={16} strokeWidth={2} className="spin" />
+          <span>Loading insight report…</span>
+        </div>
+      ) : null}
+
+      {insight && !isGenerating ? (
+        <div className="insight-body">
+          <InsightSection title="Pain clusters">
+            {insight.pain_clusters.map((cluster, i) => (
+              <div key={i} className="insight-card">
+                <div className="insight-card-head">
+                  <h5 className="insight-card-title">{cluster.name}</h5>
+                  <span
+                    className={`intensity intensity-${cluster.emotional_intensity}`}
+                  >
+                    {cluster.emotional_intensity}
+                  </span>
+                </div>
+                <p className="insight-text">{cluster.description}</p>
+                {cluster.evidence_from_sources.length > 0 ? (
+                  <ul className="phrase-list">
+                    {cluster.evidence_from_sources.map((ev, j) => (
+                      <li key={j} className="phrase">
+                        {ev}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            ))}
+          </InsightSection>
+
+          <InsightSection title="Language patterns">
+            {insight.language_patterns.map((lp, i) => (
+              <div key={i} className="insight-card">
+                <h5 className="insight-card-title">“{lp.pattern}”</h5>
+                <p className="insight-text">
+                  <strong>Meaning:</strong> {lp.meaning}
+                </p>
+                <p className="insight-text">
+                  <strong>Copy use:</strong> {lp.copywriting_use}
+                </p>
+              </div>
+            ))}
+          </InsightSection>
+
+          <InsightSection title="Emotional states">
+            {insight.emotional_states.map((es, i) => (
+              <div key={i} className="insight-card">
+                <h5 className="insight-card-title">{es.state}</h5>
+                <p className="insight-text">{es.description}</p>
+                {es.trigger_moments.length > 0 ? (
+                  <ul className="phrase-list">
+                    {es.trigger_moments.map((tm, j) => (
+                      <li key={j} className="phrase">
+                        {tm}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            ))}
+          </InsightSection>
+
+          <InsightSection title="Failed solutions">
+            {insight.failed_solutions.map((fs, i) => (
+              <div key={i} className="insight-card">
+                <h5 className="insight-card-title">{fs.solution}</h5>
+                <p className="insight-text">
+                  <strong>Why it failed:</strong> {fs.why_it_failed}
+                </p>
+                <p className="insight-text">
+                  <strong>Market belief:</strong> {fs.market_belief}
+                </p>
+              </div>
+            ))}
+          </InsightSection>
+
+          <div className="insight-columns">
+            <InsightSection title="Hopes">
+              <ul className="bullet-list">
+                {insight.hopes.map((hope, i) => (
+                  <li key={i}>{hope}</li>
+                ))}
+              </ul>
+            </InsightSection>
+            <InsightSection title="Fears">
+              <ul className="bullet-list">
+                {insight.fears.map((fear, i) => (
+                  <li key={i}>{fear}</li>
+                ))}
+              </ul>
+            </InsightSection>
+          </div>
+
+          <InsightSection title="Copywriting notes">
+            <p className="insight-text">{insight.copywriting_notes || "—"}</p>
+          </InsightSection>
+
+          <InsightSection title="Compliance warnings">
+            {insight.compliance_warnings.map((cw, i) => (
+              <div key={i} className="insight-card insight-card-warning">
+                <h5 className="insight-card-title">{cw.risk}</h5>
+                <p className="insight-text">
+                  <strong>Why it matters:</strong> {cw.why_it_matters}
+                </p>
+                <p className="insight-text">
+                  <strong>Safer direction:</strong> {cw.safer_direction}
+                </p>
+              </div>
+            ))}
+          </InsightSection>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+interface InsightSectionProps {
+  title: string;
+  children: React.ReactNode;
+}
+
+function InsightSection({ title, children }: InsightSectionProps) {
+  return (
+    <section className="insight-section">
+      <h4 className="insight-section-title">{title}</h4>
+      <div className="insight-section-body">{children}</div>
+    </section>
   );
 }
 

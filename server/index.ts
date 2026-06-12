@@ -11,8 +11,10 @@ import {
   ResearchParseError,
   OPENAI_MODEL,
 } from "./openai";
+import { generateInsightReport } from "./insights";
 import type {
   ProductProject,
+  ResearchInsight,
   ResearchRun,
   ResearchSource,
   ResearchSourceDraft,
@@ -162,6 +164,130 @@ app.post("/api/research/run", async (req, res) => {
 
   // 10. Return the saved sources (and run) to the frontend.
   return res.json({ run: completedRun, sources });
+});
+
+app.post("/api/insights/generate", async (req, res) => {
+  const projectId = (req.body as { projectId?: unknown })?.projectId;
+
+  if (typeof projectId !== "string" || projectId.trim().length === 0) {
+    return res.status(400).json({ error: "Missing or invalid 'projectId'." });
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    return res
+      .status(500)
+      .json({ error: "OPENAI_API_KEY is not set on the backend (.env.local)." });
+  }
+
+  let supabase: ReturnType<typeof getSupabase>;
+  try {
+    supabase = getSupabase();
+  } catch (error: unknown) {
+    return res.status(500).json({ error: errorMessage(error) });
+  }
+
+  // 2. Load the selected project.
+  const { data: projectData, error: projectError } = await supabase
+    .from("projects")
+    .select("*")
+    .eq("id", projectId)
+    .single();
+
+  if (projectError || !projectData) {
+    return res.status(404).json({
+      error: `Project not found: ${projectError?.message ?? projectId}`,
+    });
+  }
+
+  const project = projectData as ProductProject;
+
+  // 3. Load the latest completed research run for the "research" stage.
+  const { data: runData, error: runError } = await supabase
+    .from("research_runs")
+    .select("*")
+    .eq("project_id", project.id)
+    .eq("stage", "research")
+    .eq("status", "completed")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (runError) {
+    return res.status(500).json({
+      error: `Failed to load research run: ${runError.message}`,
+    });
+  }
+
+  if (!runData) {
+    return res.status(400).json({
+      error: "No completed research found. Please run research first.",
+    });
+  }
+
+  const run = runData as ResearchRun;
+
+  // 4. Load the sources attached to that run.
+  const { data: sourcesData, error: sourcesError } = await supabase
+    .from("research_sources")
+    .select("*")
+    .eq("run_id", run.id)
+    .order("relevance_score", { ascending: false });
+
+  if (sourcesError) {
+    return res.status(500).json({
+      error: `Failed to load research sources: ${sourcesError.message}`,
+    });
+  }
+
+  const sources = (sourcesData ?? []) as ResearchSource[];
+
+  // 5. No sources -> tell the user to run research first.
+  if (sources.length === 0) {
+    return res.status(400).json({
+      error: "No research sources found. Please run research first.",
+    });
+  }
+
+  // 6-7. Analyse the sources with OpenAI.
+  let report;
+  try {
+    report = await generateInsightReport(project, sources);
+  } catch (error: unknown) {
+    const message = errorMessage(error);
+    if (error instanceof ResearchParseError) {
+      return res.status(502).json({ error: message, raw: error.rawText });
+    }
+    return res.status(502).json({ error: message });
+  }
+
+  // 8. Save the insight report.
+  const { data: insertedData, error: insertError } = await supabase
+    .from("research_insights")
+    .insert({
+      project_id: project.id,
+      run_id: run.id,
+      pain_clusters: report.pain_clusters,
+      language_patterns: report.language_patterns,
+      emotional_states: report.emotional_states,
+      failed_solutions: report.failed_solutions,
+      hopes: report.hopes,
+      fears: report.fears,
+      copywriting_notes: report.copywriting_notes,
+      compliance_warnings: report.compliance_warnings,
+    })
+    .select()
+    .single();
+
+  if (insertError || !insertedData) {
+    return res.status(500).json({
+      error: `Failed to save insight report: ${insertError?.message ?? "unknown error"}`,
+    });
+  }
+
+  const insight = insertedData as ResearchInsight;
+
+  // 9. Return the saved insight report.
+  return res.json({ insight });
 });
 
 app.listen(PORT, () => {
