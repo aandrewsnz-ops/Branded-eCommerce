@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type {
+  CustomerAvatarOutput,
   ProductProject,
   ProductProjectInput,
   ResearchInsight,
@@ -147,4 +148,31 @@ export async function fetchLatestInsight(
   }
 
   return (data as ResearchInsight) ?? null;
+}
+
+/**
+ * Fetch the most recent saved customer avatar for a project, or null if none
+ * exists. Returns null in local-only mode (no Supabase client).
+ */
+export async function fetchLatestCustomerAvatar(
+  projectId: string
+): Promise<CustomerAvatarOutput | null> {
+  if (!supabase) {
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from("generated_outputs")
+    .select("*")
+    .eq("project_id", projectId)
+    .eq("output_type", "customer_avatar")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data as CustomerAvatarOutput) ?? null;
 }

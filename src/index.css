@@ -637,6 +637,10 @@ p {
   margin-top: 22px;
 }
 
+.avatar-panel .insight-card-title {
+  font-size: 16px;
+}
+
 .insight-date {
   font-size: 12px;
   color: var(--text-faint);

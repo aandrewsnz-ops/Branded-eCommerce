@@ -131,3 +131,80 @@ export interface ResearchInsight extends ResearchInsightReport {
 export interface GenerateInsightResponse {
   insight: ResearchInsight;
 }
+
+export interface CustomerAvatarDemographics {
+  age_range: string;
+  gender_skew: string;
+  location_context: string;
+  income_or_spending_context: string;
+  life_stage: string;
+}
+
+export interface CustomerAvatarPsychographics {
+  core_beliefs: string[];
+  attitudes: string[];
+  identity_markers: string[];
+  values: string[];
+  prejudices_or_biases: string[];
+}
+
+export interface CustomerAvatarVictoriesFailures {
+  victories: string[];
+  failures: string[];
+}
+
+export interface CustomerAvatarExistingSolution {
+  solution: string;
+  experience: string;
+  likes: string;
+  dislikes: string;
+  belief_about_effectiveness: string;
+}
+
+export interface CustomerAvatarLanguageBank {
+  phrases_they_use: string[];
+  words_to_use_in_copy: string[];
+  words_to_avoid: string[];
+}
+
+export interface CustomerAvatarCopywritingImplications {
+  best_emotional_angle: string;
+  best_logical_angle: string;
+  trust_builders: string[];
+  risk_reducers: string[];
+}
+
+/** Structured customer avatar content stored in generated_outputs.content_json. */
+export interface CustomerAvatarContent {
+  avatar_name: string;
+  avatar_summary: string;
+  demographics: CustomerAvatarDemographics;
+  psychographics: CustomerAvatarPsychographics;
+  hopes_and_dreams: string[];
+  victories_and_failures: CustomerAvatarVictoriesFailures;
+  outside_forces_they_blame: string[];
+  existing_solutions: CustomerAvatarExistingSolution[];
+  horror_stories_or_bad_experiences: string[];
+  buying_triggers: string[];
+  objections: string[];
+  language_bank: CustomerAvatarLanguageBank;
+  copywriting_implications: CustomerAvatarCopywritingImplications;
+  compliance_notes: string[];
+}
+
+/** A saved generated_outputs row for a customer avatar. */
+export interface CustomerAvatarOutput {
+  id: string;
+  project_id: string;
+  run_id: string | null;
+  output_type: "customer_avatar";
+  parent_type: string | null;
+  parent_id: string | null;
+  content_json: CustomerAvatarContent;
+  content_text: string;
+  created_at: string;
+}
+
+export interface GenerateAvatarResponse {
+  avatar: CustomerAvatarOutput;
+}

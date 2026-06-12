@@ -12,7 +12,12 @@ import {
   OPENAI_MODEL,
 } from "./openai";
 import { generateInsightReport } from "./insights";
+import {
+  generateCustomerAvatar,
+  avatarToContentText,
+} from "./avatar";
 import type {
+  CustomerAvatarOutput,
   ProductProject,
   ResearchInsight,
   ResearchRun,
@@ -288,6 +293,116 @@ app.post("/api/insights/generate", async (req, res) => {
 
   // 9. Return the saved insight report.
   return res.json({ insight });
+});
+
+app.post("/api/avatar/generate", async (req, res) => {
+  const projectId = (req.body as { projectId?: unknown })?.projectId;
+
+  if (typeof projectId !== "string" || projectId.trim().length === 0) {
+    return res.status(400).json({ error: "Missing or invalid 'projectId'." });
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    return res
+      .status(500)
+      .json({ error: "OPENAI_API_KEY is not set on the backend (.env.local)." });
+  }
+
+  let supabase: ReturnType<typeof getSupabase>;
+  try {
+    supabase = getSupabase();
+  } catch (error: unknown) {
+    return res.status(500).json({ error: errorMessage(error) });
+  }
+
+  const { data: projectData, error: projectError } = await supabase
+    .from("projects")
+    .select("*")
+    .eq("id", projectId)
+    .single();
+
+  if (projectError || !projectData) {
+    return res.status(404).json({
+      error: `Project not found: ${projectError?.message ?? projectId}`,
+    });
+  }
+
+  const project = projectData as ProductProject;
+
+  const { data: insightData, error: insightError } = await supabase
+    .from("research_insights")
+    .select("*")
+    .eq("project_id", project.id)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (insightError) {
+    return res.status(500).json({
+      error: `Failed to load insight report: ${insightError.message}`,
+    });
+  }
+
+  if (!insightData) {
+    return res.status(400).json({
+      error:
+        "No insight report found. Please run Generate Insight Report first.",
+    });
+  }
+
+  const insight = insightData as ResearchInsight;
+
+  let sources: ResearchSource[] = [];
+  if (insight.run_id) {
+    const { data: sourcesData, error: sourcesError } = await supabase
+      .from("research_sources")
+      .select("*")
+      .eq("run_id", insight.run_id)
+      .order("relevance_score", { ascending: false });
+
+    if (sourcesError) {
+      return res.status(500).json({
+        error: `Failed to load research sources: ${sourcesError.message}`,
+      });
+    }
+
+    sources = (sourcesData ?? []) as ResearchSource[];
+  }
+
+  let avatarContent;
+  try {
+    avatarContent = await generateCustomerAvatar(project, insight, sources);
+  } catch (error: unknown) {
+    const message = errorMessage(error);
+    if (error instanceof ResearchParseError) {
+      return res.status(502).json({ error: message, raw: error.rawText });
+    }
+    return res.status(502).json({ error: message });
+  }
+
+  const { data: insertedData, error: insertError } = await supabase
+    .from("generated_outputs")
+    .insert({
+      project_id: project.id,
+      run_id: insight.run_id ?? null,
+      output_type: "customer_avatar",
+      parent_type: "research_insight",
+      parent_id: insight.id,
+      content_json: avatarContent,
+      content_text: avatarToContentText(avatarContent),
+    })
+    .select()
+    .single();
+
+  if (insertError || !insertedData) {
+    return res.status(500).json({
+      error: `Failed to save customer avatar: ${insertError?.message ?? "unknown error"}`,
+    });
+  }
+
+  const avatar = insertedData as CustomerAvatarOutput;
+
+  return res.json({ avatar });
 });
 
 app.listen(PORT, () => {

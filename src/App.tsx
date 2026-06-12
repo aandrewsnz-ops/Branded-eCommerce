@@ -17,6 +17,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import {
+  fetchLatestCustomerAvatar,
   fetchLatestInsight,
   fetchLatestResearchSources,
   fetchProjects,
@@ -24,6 +25,8 @@ import {
   isSupabaseConfigured,
 } from "./lib/supabase";
 import type {
+  CustomerAvatarOutput,
+  GenerateAvatarResponse,
   GenerateInsightResponse,
   ProductProject,
   ProductProjectInput,
@@ -156,6 +159,15 @@ function App() {
   );
   const [insightError, setInsightError] = useState<string | null>(null);
 
+  const [avatarByProject, setAvatarByProject] = useState<
+    Record<string, CustomerAvatarOutput | null>
+  >({});
+  const [avatarLoadingId, setAvatarLoadingId] = useState<string | null>(null);
+  const [generatingAvatarId, setGeneratingAvatarId] = useState<string | null>(
+    null
+  );
+  const [avatarError, setAvatarError] = useState<string | null>(null);
+
   useEffect(() => {
     if (!isSupabaseConfigured) {
       return;
@@ -275,6 +287,46 @@ function App() {
     };
   }, [selectedId, insightByProject]);
 
+  useEffect(() => {
+    if (!isSupabaseConfigured || !selectedId) {
+      return;
+    }
+    if (selectedId in avatarByProject) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const load = async () => {
+      setAvatarLoadingId(selectedId);
+      setAvatarError(null);
+      try {
+        const avatar = await fetchLatestCustomerAvatar(selectedId);
+        if (cancelled) return;
+        setAvatarByProject((prev) => ({ ...prev, [selectedId]: avatar }));
+      } catch (err: unknown) {
+        if (cancelled) return;
+        setAvatarError(
+          err instanceof Error
+            ? `Failed to load customer avatar: ${err.message}`
+            : "Failed to load customer avatar."
+        );
+      } finally {
+        if (!cancelled) {
+          setAvatarLoadingId((current) =>
+            current === selectedId ? null : current
+          );
+        }
+      }
+    };
+
+    void load();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId, avatarByProject]);
+
   function updateField<K extends keyof ProductProjectInput>(
     key: K,
     value: ProductProjectInput[K]
@@ -327,7 +379,11 @@ function App() {
       return;
     }
 
-    // Only "Run Research" / insight are wired; other stages stay placeholders.
+    if (stage.id === "customer_avatar") {
+      await handleGenerateAvatar(selectedProject.id);
+      return;
+    }
+
     if (stage.id !== "research") {
       setStatusMessage(`${stage.label} coming next`);
       return;
@@ -403,6 +459,42 @@ function App() {
       );
     } finally {
       setGeneratingInsightId((current) =>
+        current === projectId ? null : current
+      );
+    }
+  }
+
+  async function handleGenerateAvatar(projectId: string) {
+    setStatusMessage(null);
+    setAvatarError(null);
+    setGeneratingAvatarId(projectId);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/avatar/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId }),
+      });
+
+      const payload: unknown = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        const message =
+          payload && typeof payload === "object" && "error" in payload
+            ? String((payload as { error: unknown }).error)
+            : `Customer avatar failed (HTTP ${res.status}).`;
+        throw new Error(message);
+      }
+
+      const data = payload as GenerateAvatarResponse;
+      setAvatarByProject((prev) => ({ ...prev, [projectId]: data.avatar }));
+      setStatusMessage("Customer avatar generated.");
+    } catch (err: unknown) {
+      setAvatarError(
+        err instanceof Error ? err.message : "Customer avatar failed."
+      );
+    } finally {
+      setGeneratingAvatarId((current) =>
         current === projectId ? null : current
       );
     }
@@ -609,6 +701,10 @@ function App() {
               isInsightLoading={insightLoadingId === selectedProject.id}
               insightError={insightError}
               insight={insightByProject[selectedProject.id] ?? null}
+              isGeneratingAvatar={generatingAvatarId === selectedProject.id}
+              isAvatarLoading={avatarLoadingId === selectedProject.id}
+              avatarError={avatarError}
+              avatar={avatarByProject[selectedProject.id] ?? null}
             />
           ) : (
             <div className="empty-state">
@@ -687,6 +783,10 @@ interface ProjectDetailProps {
   isInsightLoading: boolean;
   insightError: string | null;
   insight: ResearchInsight | null;
+  isGeneratingAvatar: boolean;
+  isAvatarLoading: boolean;
+  avatarError: string | null;
+  avatar: CustomerAvatarOutput | null;
 }
 
 function ProjectDetail({
@@ -701,6 +801,10 @@ function ProjectDetail({
   isInsightLoading,
   insightError,
   insight,
+  isGeneratingAvatar,
+  isAvatarLoading,
+  avatarError,
+  avatar,
 }: ProjectDetailProps) {
   return (
     <div className="detail">
@@ -750,11 +854,14 @@ function ProjectDetail({
             const Icon = STAGE_ICONS[stage.id];
             const busy =
               (stage.id === "research" && isResearching) ||
-              (stage.id === "insight_report" && isGeneratingInsight);
+              (stage.id === "insight_report" && isGeneratingInsight) ||
+              (stage.id === "customer_avatar" && isGeneratingAvatar);
             const busyLabel =
               stage.id === "research"
                 ? "Running research…"
-                : "Generating insight report…";
+                : stage.id === "insight_report"
+                  ? "Generating insight report…"
+                  : "Generating customer avatar…";
             return (
               <button
                 key={stage.id}
@@ -790,6 +897,13 @@ function ProjectDetail({
         isLoading={isInsightLoading}
         error={insightError}
         insight={insight}
+      />
+
+      <CustomerAvatarPanel
+        isGenerating={isGeneratingAvatar}
+        isLoading={isAvatarLoading}
+        error={avatarError}
+        avatar={avatar}
       />
     </div>
   );
@@ -1069,6 +1183,271 @@ function InsightSection({ title, children }: InsightSectionProps) {
       <h4 className="insight-section-title">{title}</h4>
       <div className="insight-section-body">{children}</div>
     </section>
+  );
+}
+
+interface CustomerAvatarPanelProps {
+  isGenerating: boolean;
+  isLoading: boolean;
+  error: string | null;
+  avatar: CustomerAvatarOutput | null;
+}
+
+function CustomerAvatarPanel({
+  isGenerating,
+  isLoading,
+  error,
+  avatar,
+}: CustomerAvatarPanelProps) {
+  const hasContent = isGenerating || isLoading || error || avatar;
+  if (!hasContent) {
+    return null;
+  }
+
+  const content = avatar?.content_json;
+
+  return (
+    <div className="insight avatar-panel">
+      <div className="research-head">
+        <h3 className="workflow-title">Customer avatar</h3>
+        {avatar ? (
+          <span className="insight-date">
+            {new Date(avatar.created_at).toLocaleString()}
+          </span>
+        ) : null}
+      </div>
+
+      {error ? (
+        <div className="banner banner-error" role="alert">
+          <AlertTriangle size={16} />
+          <span>{error}</span>
+        </div>
+      ) : null}
+
+      {isGenerating ? (
+        <div className="list-state">
+          <Loader2 size={16} strokeWidth={2} className="spin" />
+          <span>Generating customer avatar… this can take a minute.</span>
+        </div>
+      ) : isLoading ? (
+        <div className="list-state">
+          <Loader2 size={16} strokeWidth={2} className="spin" />
+          <span>Loading customer avatar…</span>
+        </div>
+      ) : null}
+
+      {content && !isGenerating ? (
+        <div className="insight-body">
+          <InsightSection title="Avatar summary">
+            <div className="insight-card">
+              <h5 className="insight-card-title">{content.avatar_name}</h5>
+              <p className="insight-text">{content.avatar_summary}</p>
+            </div>
+          </InsightSection>
+
+          <InsightSection title="Demographics">
+            <div className="insight-card">
+              <p className="insight-text">
+                <strong>Age range:</strong> {content.demographics.age_range}
+              </p>
+              <p className="insight-text">
+                <strong>Gender skew:</strong> {content.demographics.gender_skew}
+              </p>
+              <p className="insight-text">
+                <strong>Location:</strong>{" "}
+                {content.demographics.location_context}
+              </p>
+              <p className="insight-text">
+                <strong>Income / spending:</strong>{" "}
+                {content.demographics.income_or_spending_context}
+              </p>
+              <p className="insight-text">
+                <strong>Life stage:</strong> {content.demographics.life_stage}
+              </p>
+            </div>
+          </InsightSection>
+
+          <InsightSection title="Psychographics">
+            <div className="insight-card">
+              <p className="insight-text">
+                <strong>Core beliefs</strong>
+              </p>
+              <ul className="bullet-list">
+                {content.psychographics.core_beliefs.map((item, i) => (
+                  <li key={i}>{item}</li>
+                ))}
+              </ul>
+              <p className="insight-text">
+                <strong>Attitudes</strong>
+              </p>
+              <ul className="bullet-list">
+                {content.psychographics.attitudes.map((item, i) => (
+                  <li key={i}>{item}</li>
+                ))}
+              </ul>
+              <p className="insight-text">
+                <strong>Identity markers</strong>
+              </p>
+              <ul className="bullet-list">
+                {content.psychographics.identity_markers.map((item, i) => (
+                  <li key={i}>{item}</li>
+                ))}
+              </ul>
+              <p className="insight-text">
+                <strong>Values</strong>
+              </p>
+              <ul className="bullet-list">
+                {content.psychographics.values.map((item, i) => (
+                  <li key={i}>{item}</li>
+                ))}
+              </ul>
+              <p className="insight-text">
+                <strong>Prejudices / biases</strong>
+              </p>
+              <ul className="bullet-list">
+                {content.psychographics.prejudices_or_biases.map((item, i) => (
+                  <li key={i}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          </InsightSection>
+
+          <InsightSection title="Hopes and dreams">
+            <ul className="bullet-list">
+              {content.hopes_and_dreams.map((hope, i) => (
+                <li key={i}>{hope}</li>
+              ))}
+            </ul>
+          </InsightSection>
+
+          <div className="insight-columns">
+            <InsightSection title="Victories">
+              <ul className="bullet-list">
+                {content.victories_and_failures.victories.map((v, i) => (
+                  <li key={i}>{v}</li>
+                ))}
+              </ul>
+            </InsightSection>
+            <InsightSection title="Failures">
+              <ul className="bullet-list">
+                {content.victories_and_failures.failures.map((f, i) => (
+                  <li key={i}>{f}</li>
+                ))}
+              </ul>
+            </InsightSection>
+          </div>
+
+          <InsightSection title="Existing solutions">
+            {content.existing_solutions.map((sol, i) => (
+              <div key={i} className="insight-card">
+                <h5 className="insight-card-title">{sol.solution}</h5>
+                <p className="insight-text">
+                  <strong>Experience:</strong> {sol.experience}
+                </p>
+                <p className="insight-text">
+                  <strong>Likes:</strong> {sol.likes}
+                </p>
+                <p className="insight-text">
+                  <strong>Dislikes:</strong> {sol.dislikes}
+                </p>
+                <p className="insight-text">
+                  <strong>Belief about effectiveness:</strong>{" "}
+                  {sol.belief_about_effectiveness}
+                </p>
+              </div>
+            ))}
+          </InsightSection>
+
+          <InsightSection title="Buying triggers">
+            <ul className="bullet-list">
+              {content.buying_triggers.map((trigger, i) => (
+                <li key={i}>{trigger}</li>
+              ))}
+            </ul>
+          </InsightSection>
+
+          <InsightSection title="Objections">
+            <ul className="bullet-list">
+              {content.objections.map((objection, i) => (
+                <li key={i}>{objection}</li>
+              ))}
+            </ul>
+          </InsightSection>
+
+          <InsightSection title="Language bank">
+            <div className="insight-card">
+              <p className="insight-text">
+                <strong>Phrases they use</strong>
+              </p>
+              <ul className="phrase-list">
+                {content.language_bank.phrases_they_use.map((phrase, i) => (
+                  <li key={i} className="phrase">
+                    “{phrase}”
+                  </li>
+                ))}
+              </ul>
+              <p className="insight-text">
+                <strong>Words to use in copy</strong>
+              </p>
+              <ul className="bullet-list">
+                {content.language_bank.words_to_use_in_copy.map((word, i) => (
+                  <li key={i}>{word}</li>
+                ))}
+              </ul>
+              <p className="insight-text">
+                <strong>Words to avoid</strong>
+              </p>
+              <ul className="bullet-list">
+                {content.language_bank.words_to_avoid.map((word, i) => (
+                  <li key={i}>{word}</li>
+                ))}
+              </ul>
+            </div>
+          </InsightSection>
+
+          <InsightSection title="Copywriting implications">
+            <div className="insight-card">
+              <p className="insight-text">
+                <strong>Best emotional angle:</strong>{" "}
+                {content.copywriting_implications.best_emotional_angle}
+              </p>
+              <p className="insight-text">
+                <strong>Best logical angle:</strong>{" "}
+                {content.copywriting_implications.best_logical_angle}
+              </p>
+              <p className="insight-text">
+                <strong>Trust builders</strong>
+              </p>
+              <ul className="bullet-list">
+                {content.copywriting_implications.trust_builders.map(
+                  (item, i) => (
+                    <li key={i}>{item}</li>
+                  )
+                )}
+              </ul>
+              <p className="insight-text">
+                <strong>Risk reducers</strong>
+              </p>
+              <ul className="bullet-list">
+                {content.copywriting_implications.risk_reducers.map(
+                  (item, i) => (
+                    <li key={i}>{item}</li>
+                  )
+                )}
+              </ul>
+            </div>
+          </InsightSection>
+
+          <InsightSection title="Compliance notes">
+            <ul className="bullet-list">
+              {content.compliance_notes.map((note, i) => (
+                <li key={i}>{note}</li>
+              ))}
+            </ul>
+          </InsightSection>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
