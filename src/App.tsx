@@ -24,8 +24,12 @@ import {
 import type {
   ProductProject,
   ProductProjectInput,
+  ResearchSource,
+  RunResearchResponse,
   WorkflowStage,
 } from "./types";
+
+const API_BASE = "http://localhost:3001";
 
 const WORKFLOW_STAGES: readonly WorkflowStage[] = [
   { id: "research", label: "Run Research" },
@@ -130,6 +134,13 @@ function App() {
   const [isCreating, setIsCreating] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Research results + status, keyed by project id.
+  const [researchByProject, setResearchByProject] = useState<
+    Record<string, ResearchSource[]>
+  >({});
+  const [researchingId, setResearchingId] = useState<string | null>(null);
+  const [researchError, setResearchError] = useState<string | null>(null);
+
   useEffect(() => {
     if (!isSupabaseConfigured) {
       return;
@@ -206,8 +217,54 @@ function App() {
     }
   }
 
-  function handleRunStage(stage: WorkflowStage) {
-    setStatusMessage(`${stage.label} coming next`);
+  async function handleRunStage(stage: WorkflowStage) {
+    // Only "Run Research" is wired to the backend; other stages stay placeholders.
+    if (stage.id !== "research") {
+      setStatusMessage(`${stage.label} coming next`);
+      return;
+    }
+
+    if (!selectedProject) {
+      return;
+    }
+
+    const projectId = selectedProject.id;
+    setStatusMessage(null);
+    setResearchError(null);
+    setResearchingId(projectId);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/research/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId }),
+      });
+
+      const payload: unknown = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        const message =
+          payload && typeof payload === "object" && "error" in payload
+            ? String((payload as { error: unknown }).error)
+            : `Research failed (HTTP ${res.status}).`;
+        throw new Error(message);
+      }
+
+      const data = payload as RunResearchResponse;
+      setResearchByProject((prev) => ({
+        ...prev,
+        [projectId]: data.sources,
+      }));
+      setStatusMessage(
+        `Research complete: ${data.sources.length} sources saved.`
+      );
+    } catch (err: unknown) {
+      setResearchError(
+        err instanceof Error ? err.message : "Research failed."
+      );
+    } finally {
+      setResearchingId((current) => (current === projectId ? null : current));
+    }
   }
 
   return (
@@ -403,6 +460,9 @@ function App() {
               project={selectedProject}
               statusMessage={statusMessage}
               onRunStage={handleRunStage}
+              isResearching={researchingId === selectedProject.id}
+              researchError={researchError}
+              researchSources={researchByProject[selectedProject.id] ?? []}
             />
           ) : (
             <div className="empty-state">
@@ -473,12 +533,18 @@ interface ProjectDetailProps {
   project: ProductProject;
   statusMessage: string | null;
   onRunStage: (stage: WorkflowStage) => void;
+  isResearching: boolean;
+  researchError: string | null;
+  researchSources: ResearchSource[];
 }
 
 function ProjectDetail({
   project,
   statusMessage,
   onRunStage,
+  isResearching,
+  researchError,
+  researchSources,
 }: ProjectDetailProps) {
   return (
     <div className="detail">
@@ -525,21 +591,125 @@ function ProjectDetail({
         </div>
         <div className="workflow-grid">
           {WORKFLOW_STAGES.map((stage, index) => {
+            const isResearchStage = stage.id === "research";
             const Icon = STAGE_ICONS[stage.id];
+            const busy = isResearchStage && isResearching;
             return (
               <button
                 key={stage.id}
                 type="button"
                 className="stage-btn"
                 onClick={() => onRunStage(stage)}
+                disabled={busy}
               >
                 <span className="stage-index">{index + 1}</span>
-                <Icon size={16} strokeWidth={2} />
-                <span className="stage-label">{stage.label}</span>
+                {busy ? (
+                  <Loader2 size={16} strokeWidth={2} className="spin" />
+                ) : (
+                  <Icon size={16} strokeWidth={2} />
+                )}
+                <span className="stage-label">
+                  {busy ? "Running research…" : stage.label}
+                </span>
               </button>
             );
           })}
         </div>
+      </div>
+
+      <ResearchResults
+        isResearching={isResearching}
+        researchError={researchError}
+        sources={researchSources}
+      />
+    </div>
+  );
+}
+
+interface ResearchResultsProps {
+  isResearching: boolean;
+  researchError: string | null;
+  sources: ResearchSource[];
+}
+
+function ResearchResults({
+  isResearching,
+  researchError,
+  sources,
+}: ResearchResultsProps) {
+  const hasContent = isResearching || researchError || sources.length > 0;
+  if (!hasContent) {
+    return null;
+  }
+
+  return (
+    <div className="research">
+      <div className="research-head">
+        <h3 className="workflow-title">Research sources</h3>
+        {sources.length > 0 ? (
+          <span className="count-badge">{sources.length}</span>
+        ) : null}
+      </div>
+
+      {researchError ? (
+        <div className="banner banner-error" role="alert">
+          <AlertTriangle size={16} />
+          <span>{researchError}</span>
+        </div>
+      ) : null}
+
+      {isResearching ? (
+        <div className="list-state">
+          <Loader2 size={16} strokeWidth={2} className="spin" />
+          <span>Searching public discussions… this can take a minute.</span>
+        </div>
+      ) : null}
+
+      <div className="source-list">
+        {sources.map((source) => (
+          <article key={source.id} className="source-card">
+            <header className="source-card-head">
+              <h4 className="source-title">{source.title || "Untitled source"}</h4>
+              <span className="score-pill">{source.relevance_score}</span>
+            </header>
+
+            <div className="source-meta">
+              {source.platform ? (
+                <span className="meta-chip">{source.platform}</span>
+              ) : null}
+              {source.emotional_theme ? (
+                <span className="meta-chip meta-chip-theme">
+                  {source.emotional_theme}
+                </span>
+              ) : null}
+            </div>
+
+            {source.summary ? (
+              <p className="source-summary">{source.summary}</p>
+            ) : null}
+
+            {source.useful_phrases.length > 0 ? (
+              <ul className="phrase-list">
+                {source.useful_phrases.map((phrase, i) => (
+                  <li key={i} className="phrase">
+                    “{phrase}”
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+
+            {source.url ? (
+              <a
+                className="source-link"
+                href={source.url}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {source.url}
+              </a>
+            ) : null}
+          </article>
+        ))}
       </div>
     </div>
   );

@@ -1,0 +1,173 @@
+import OpenAI from "openai";
+import type { ProductProject, ResearchSourceDraft } from "../src/types";
+
+/**
+ * Model used for research. Easy to change in one place if the Responses API /
+ * SDK types require a different identifier.
+ */
+export const OPENAI_MODEL = "gpt-5.5";
+
+/** Number of sources to gather for this MVP. The next version will raise this. */
+export const RESEARCH_SOURCE_COUNT = 5;
+
+/** Error thrown when the model response cannot be parsed as the expected JSON. */
+export class ResearchParseError extends Error {
+  rawText: string;
+  constructor(message: string, rawText: string) {
+    super(message);
+    this.name = "ResearchParseError";
+    this.rawText = rawText;
+  }
+}
+
+function getOpenAI(): OpenAI {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error(
+      "OPENAI_API_KEY is not set. Add it to .env.local (backend only)."
+    );
+  }
+  return new OpenAI({ apiKey });
+}
+
+function buildPrompt(project: ProductProject): string {
+  return [
+    "You are a customer research analyst for direct-response ecommerce.",
+    "",
+    "Use the web_search tool to find REAL, public online discussions where",
+    "people describe the underlying problem that the product below solves.",
+    "Look at sources like Reddit, forums, Quora, blog comments, review threads,",
+    "and social posts.",
+    "",
+    `Find exactly ${RESEARCH_SOURCE_COUNT} high-quality sources.`,
+    "",
+    "Focus ONLY on the human, emotional layer of the underlying problem:",
+    "- emotional pain, frustration, fear, anxiety",
+    "- the exact language and phrases real people use",
+    "- failed solutions they have already tried",
+    "- rock-bottom / breaking-point moments",
+    "",
+    "Strict rules:",
+    "- Research the UNDERLYING PROBLEM, not this specific product.",
+    "- Do NOT include complaints or reviews about the competitor product itself.",
+    "- Only use real URLs you actually found via web_search. Never invent URLs.",
+    "- relevance_score is an integer from 0 to 100.",
+    "- useful_phrases must be short verbatim-style phrases real people use.",
+    "",
+    "Product context:",
+    `- product_name: ${project.product_name}`,
+    `- product_description: ${project.product_description}`,
+    `- competitor_url: ${project.competitor_url}`,
+    `- target_country: ${project.target_country}`,
+    `- target_customer: ${project.target_customer}`,
+    `- main_problem: ${project.main_problem}`,
+    `- offer: ${project.offer}`,
+    `- claims_allowed: ${project.claims_allowed}`,
+    `- claims_banned: ${project.claims_banned}`,
+    `- brand_tone: ${project.brand_tone}`,
+    `- output_goal: ${project.output_goal}`,
+    "",
+    "Respond with VALID JSON ONLY (no markdown, no commentary) in exactly this shape:",
+    "{",
+    '  "sources": [',
+    "    {",
+    '      "url": "string",',
+    '      "platform": "string",',
+    '      "title": "string",',
+    '      "summary": "string",',
+    '      "emotional_theme": "string",',
+    '      "relevance_score": number,',
+    '      "useful_phrases": ["string"]',
+    "    }",
+    "  ]",
+    "}",
+  ].join("\n");
+}
+
+/** Pull a JSON object out of a model response that may be wrapped in prose/fences. */
+function extractJson(text: string): unknown {
+  let candidate = text.trim();
+
+  const fenced = candidate.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced) {
+    candidate = fenced[1].trim();
+  }
+
+  const start = candidate.indexOf("{");
+  const end = candidate.lastIndexOf("}");
+  if (start !== -1 && end !== -1 && end > start) {
+    candidate = candidate.slice(start, end + 1);
+  }
+
+  return JSON.parse(candidate);
+}
+
+function toStringValue(value: unknown): string {
+  return typeof value === "string" ? value : value == null ? "" : String(value);
+}
+
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(toStringValue).filter((item) => item.trim().length > 0);
+}
+
+function toScore(value: unknown): number {
+  const num = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(num) ? num : 0;
+}
+
+function normalizeSources(parsed: unknown): ResearchSourceDraft[] {
+  const sourcesRaw =
+    parsed && typeof parsed === "object" && "sources" in parsed
+      ? (parsed as { sources: unknown }).sources
+      : null;
+
+  if (!Array.isArray(sourcesRaw)) {
+    throw new Error('Parsed JSON did not contain a "sources" array.');
+  }
+
+  return sourcesRaw.map((item) => {
+    const record = (item ?? {}) as Record<string, unknown>;
+    return {
+      url: toStringValue(record.url),
+      platform: toStringValue(record.platform),
+      title: toStringValue(record.title),
+      summary: toStringValue(record.summary),
+      emotional_theme: toStringValue(record.emotional_theme),
+      relevance_score: toScore(record.relevance_score),
+      useful_phrases: toStringArray(record.useful_phrases),
+    };
+  });
+}
+
+/**
+ * Run the research stage for a project using the OpenAI Responses API with the
+ * web_search tool. Returns normalized source drafts.
+ *
+ * Throws ResearchParseError (with raw text) if the model output is not JSON.
+ */
+export async function runResearchForProject(
+  project: ProductProject
+): Promise<ResearchSourceDraft[]> {
+  const client = getOpenAI();
+
+  const response = await client.responses.create({
+    model: OPENAI_MODEL,
+    tools: [{ type: "web_search" }],
+    input: buildPrompt(project),
+  });
+
+  const text = response.output_text ?? "";
+
+  let parsed: unknown;
+  try {
+    parsed = extractJson(text);
+  } catch {
+    throw new ResearchParseError(
+      "OpenAI did not return valid JSON.",
+      text
+    );
+  }
+
+  return normalizeSources(parsed);
+}

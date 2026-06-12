@@ -33,3 +33,44 @@ export interface WorkflowStage {
   id: WorkflowStageId;
   label: string;
 }
+
+export type ResearchRunStatus = "running" | "completed" | "failed";
+
+export interface ResearchRun {
+  id: string;
+  project_id: string;
+  stage: string;
+  status: ResearchRunStatus;
+  error: string | null;
+  created_at: string;
+}
+
+export interface ResearchSource {
+  id: string;
+  run_id: string;
+  project_id: string;
+  url: string;
+  platform: string;
+  title: string;
+  summary: string;
+  emotional_theme: string;
+  relevance_score: number;
+  useful_phrases: string[];
+  created_at: string;
+}
+
+/** Shape the OpenAI model returns for each source (before DB metadata is added). */
+export interface ResearchSourceDraft {
+  url: string;
+  platform: string;
+  title: string;
+  summary: string;
+  emotional_theme: string;
+  relevance_score: number;
+  useful_phrases: string[];
+}
+
+export interface RunResearchResponse {
+  run: ResearchRun;
+  sources: ResearchSource[];
+}
