@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Search,
   FileText,
@@ -13,7 +13,14 @@ import {
   Boxes,
   Globe,
   Tag,
+  Loader2,
+  AlertTriangle,
 } from "lucide-react";
+import {
+  fetchProjects,
+  insertProject,
+  isSupabaseConfigured,
+} from "./lib/supabase";
 import type {
   ProductProject,
   ProductProjectInput,
@@ -109,12 +116,50 @@ function createId(): string {
 }
 
 function App() {
-  const [projects, setProjects] = useState<ProductProject[]>(SAMPLE_PROJECTS);
+  // Start empty + loading when Supabase is configured; otherwise fall back to
+  // the local sample projects so the shell still works without a backend.
+  const [projects, setProjects] = useState<ProductProject[]>(
+    isSupabaseConfigured ? [] : SAMPLE_PROJECTS
+  );
   const [selectedId, setSelectedId] = useState<string | null>(
-    SAMPLE_PROJECTS[0]?.id ?? null
+    isSupabaseConfigured ? null : SAMPLE_PROJECTS[0]?.id ?? null
   );
   const [form, setForm] = useState<ProductProjectInput>(EMPTY_FORM);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState<boolean>(isSupabaseConfigured);
+  const [isCreating, setIsCreating] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured) {
+      return;
+    }
+
+    let cancelled = false;
+
+    fetchProjects()
+      .then((rows) => {
+        if (cancelled) return;
+        setProjects(rows);
+        setSelectedId(rows[0]?.id ?? null);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setError(
+          err instanceof Error
+            ? `Failed to load projects: ${err.message}`
+            : "Failed to load projects."
+        );
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setIsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const selectedProject =
     projects.find((project) => project.id === selectedId) ?? null;
@@ -126,17 +171,39 @@ function App() {
     setForm((prev) => ({ ...prev, [key]: value }));
   }
 
-  function handleCreateProject(event: React.FormEvent<HTMLFormElement>) {
+  async function handleCreateProject(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const newProject: ProductProject = {
-      ...form,
-      id: createId(),
-      created_at: new Date().toISOString(),
-    };
-    setProjects((prev) => [newProject, ...prev]);
-    setSelectedId(newProject.id);
-    setForm(EMPTY_FORM);
     setStatusMessage(null);
+    setError(null);
+
+    // Local-only mode: keep the original in-memory behaviour.
+    if (!isSupabaseConfigured) {
+      const localProject: ProductProject = {
+        ...form,
+        id: createId(),
+        created_at: new Date().toISOString(),
+      };
+      setProjects((prev) => [localProject, ...prev]);
+      setSelectedId(localProject.id);
+      setForm(EMPTY_FORM);
+      return;
+    }
+
+    setIsCreating(true);
+    try {
+      const saved = await insertProject(form);
+      setProjects((prev) => [saved, ...prev]);
+      setSelectedId(saved.id);
+      setForm(EMPTY_FORM);
+    } catch (err: unknown) {
+      setError(
+        err instanceof Error
+          ? `Failed to create project: ${err.message}`
+          : "Failed to create project."
+      );
+    } finally {
+      setIsCreating(false);
+    }
   }
 
   function handleRunStage(stage: WorkflowStage) {
@@ -303,15 +370,35 @@ function App() {
               />
             </label>
 
-            <button type="submit" className="btn btn-primary">
-              <Plus size={16} strokeWidth={2.5} />
-              Create project
+            <button
+              type="submit"
+              className="btn btn-primary"
+              disabled={isCreating}
+            >
+              {isCreating ? (
+                <Loader2 size={16} strokeWidth={2.5} className="spin" />
+              ) : (
+                <Plus size={16} strokeWidth={2.5} />
+              )}
+              {isCreating ? "Creating…" : "Create project"}
             </button>
           </form>
         </aside>
 
         <section className="panel detail-panel">
-          {selectedProject ? (
+          {error ? (
+            <div className="banner banner-error" role="alert">
+              <AlertTriangle size={16} />
+              <span>{error}</span>
+            </div>
+          ) : null}
+
+          {isLoading ? (
+            <div className="empty-state">
+              <Loader2 size={36} strokeWidth={1.5} className="spin" />
+              <p>Loading projects…</p>
+            </div>
+          ) : selectedProject ? (
             <ProjectDetail
               project={selectedProject}
               statusMessage={statusMessage}
@@ -320,7 +407,11 @@ function App() {
           ) : (
             <div className="empty-state">
               <Boxes size={40} strokeWidth={1.5} />
-              <p>Select a project or create a new one to begin.</p>
+              <p>
+                {projects.length === 0
+                  ? "No projects yet. Create one to begin."
+                  : "Select a project to begin."}
+              </p>
             </div>
           )}
         </section>
@@ -330,38 +421,48 @@ function App() {
             <h2 className="panel-title">Projects</h2>
             <span className="count-badge">{projects.length}</span>
           </div>
-          <ul className="project-list">
-            {projects.map((project) => {
-              const isActive = project.id === selectedId;
-              return (
-                <li key={project.id}>
-                  <button
-                    type="button"
-                    className={`project-item${isActive ? " is-active" : ""}`}
-                    onClick={() => setSelectedId(project.id)}
-                  >
-                    <span className="project-item-name">
-                      {project.product_name || "Untitled project"}
-                    </span>
-                    <span className="project-item-meta">
-                      {project.target_country ? (
-                        <span className="meta-chip">
-                          <Globe size={12} />
-                          {project.target_country}
-                        </span>
-                      ) : null}
-                      {project.product_price ? (
-                        <span className="meta-chip">
-                          <Tag size={12} />
-                          {project.product_price}
-                        </span>
-                      ) : null}
-                    </span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
+
+          {isLoading ? (
+            <div className="list-state">
+              <Loader2 size={16} strokeWidth={2} className="spin" />
+              <span>Loading…</span>
+            </div>
+          ) : projects.length === 0 ? (
+            <div className="list-state">No projects yet.</div>
+          ) : (
+            <ul className="project-list">
+              {projects.map((project) => {
+                const isActive = project.id === selectedId;
+                return (
+                  <li key={project.id}>
+                    <button
+                      type="button"
+                      className={`project-item${isActive ? " is-active" : ""}`}
+                      onClick={() => setSelectedId(project.id)}
+                    >
+                      <span className="project-item-name">
+                        {project.product_name || "Untitled project"}
+                      </span>
+                      <span className="project-item-meta">
+                        {project.target_country ? (
+                          <span className="meta-chip">
+                            <Globe size={12} />
+                            {project.target_country}
+                          </span>
+                        ) : null}
+                        {project.product_price ? (
+                          <span className="meta-chip">
+                            <Tag size={12} />
+                            {project.product_price}
+                          </span>
+                        ) : null}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </aside>
       </main>
     </div>
