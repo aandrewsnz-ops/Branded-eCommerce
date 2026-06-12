@@ -1,22 +1,124 @@
 export interface ProductProject {
   id: string;
-  product_name: string;
-  product_description: string;
-  competitor_url: string;
+
+  /* ---- New dropshipping setup fields ---- */
+  our_product_name: string;
+  supplier_product_url: string;
+  supplier_product_description: string;
+  primary_competitor_url: string;
+  additional_competitor_urls: string;
+  closest_competitor_product_description: string;
   target_country: string;
-  target_customer: string;
-  main_problem: string;
-  product_price: string;
-  offer: string;
-  claims_allowed: string;
-  claims_banned: string;
-  brand_tone: string;
-  output_goal: string;
+  cost_price_including_shipping: string;
+  planned_sale_price: string;
+  current_offer: string;
+  initial_problem_hypothesis: string;
+  initial_customer_hypothesis: string;
+  preferred_tone: string;
+
+  /* ---- Legacy columns (kept for backwards compatibility; not deleted) ---- */
+  product_name?: string;
+  product_description?: string;
+  competitor_url?: string;
+  target_customer?: string;
+  main_problem?: string;
+  product_price?: string;
+  offer?: string;
+  claims_allowed?: string;
+  claims_banned?: string;
+  brand_tone?: string;
+  output_goal?: string;
+
   created_at: string;
 }
 
-/** Shape of the form used to create a new project (everything except generated metadata). */
-export type ProductProjectInput = Omit<ProductProject, "id" | "created_at">;
+/** Shape of the form used to create a new project (new setup fields only). */
+export interface ProductProjectInput {
+  our_product_name: string;
+  supplier_product_url: string;
+  supplier_product_description: string;
+  primary_competitor_url: string;
+  additional_competitor_urls: string;
+  closest_competitor_product_description: string;
+  target_country: string;
+  cost_price_including_shipping: string;
+  planned_sale_price: string;
+  current_offer: string;
+  initial_problem_hypothesis: string;
+  initial_customer_hypothesis: string;
+  preferred_tone: string;
+}
+
+function firstNonEmpty(...values: (string | undefined | null)[]): string {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value;
+    }
+  }
+  return "";
+}
+
+/**
+ * Fill new setup fields from legacy columns when the new field is empty, and
+ * back-fill legacy field names from the new values so any code (or prompt) that
+ * still reads the old names keeps working. Safe to call on any project row.
+ */
+export function normalizeProject(raw: ProductProject): ProductProject {
+  const our_product_name = firstNonEmpty(raw.our_product_name, raw.product_name);
+  const supplier_product_description = firstNonEmpty(
+    raw.supplier_product_description,
+    raw.product_description
+  );
+  const primary_competitor_url = firstNonEmpty(
+    raw.primary_competitor_url,
+    raw.competitor_url
+  );
+  const planned_sale_price = firstNonEmpty(
+    raw.planned_sale_price,
+    raw.product_price
+  );
+  const current_offer = firstNonEmpty(raw.current_offer, raw.offer);
+  const initial_problem_hypothesis = firstNonEmpty(
+    raw.initial_problem_hypothesis,
+    raw.main_problem
+  );
+  const initial_customer_hypothesis = firstNonEmpty(
+    raw.initial_customer_hypothesis,
+    raw.target_customer
+  );
+  const preferred_tone = firstNonEmpty(raw.preferred_tone, raw.brand_tone);
+
+  return {
+    ...raw,
+    our_product_name,
+    supplier_product_url: raw.supplier_product_url ?? "",
+    supplier_product_description,
+    primary_competitor_url,
+    additional_competitor_urls: raw.additional_competitor_urls ?? "",
+    closest_competitor_product_description:
+      raw.closest_competitor_product_description ?? "",
+    target_country: raw.target_country ?? "",
+    cost_price_including_shipping: raw.cost_price_including_shipping ?? "",
+    planned_sale_price,
+    current_offer,
+    initial_problem_hypothesis,
+    initial_customer_hypothesis,
+    preferred_tone,
+
+    // Back-fill legacy field names for prompt code that still reads them.
+    product_name: our_product_name,
+    product_description: supplier_product_description,
+    competitor_url: primary_competitor_url,
+    product_price: planned_sale_price,
+    offer: current_offer,
+    target_customer: initial_customer_hypothesis,
+    main_problem: initial_problem_hypothesis,
+    brand_tone: preferred_tone,
+    claims_allowed: raw.claims_allowed ?? "",
+    claims_banned: raw.claims_banned ?? "",
+    output_goal: raw.output_goal ?? "",
+  };
+}
 
 export type WorkflowStageId =
   | "research"
@@ -260,13 +362,45 @@ export interface MarketingAngleDraft {
   compliance_notes: string[];
 }
 
+export type AngleReviewStatus =
+  | "untested"
+  | "shortlisted"
+  | "rejected"
+  | "needs_copy"
+  | "ready_for_creative"
+  | "ready_to_publish";
+
+export const ANGLE_REVIEW_STATUSES: readonly AngleReviewStatus[] = [
+  "untested",
+  "shortlisted",
+  "rejected",
+  "needs_copy",
+  "ready_for_creative",
+  "ready_to_publish",
+] as const;
+
+export interface AngleReviewPatch {
+  review_status?: AngleReviewStatus;
+  is_shortlisted?: boolean;
+  priority_score?: number;
+  reviewer_notes?: string;
+}
+
 /** A saved row from the marketing_angles table. */
 export interface MarketingAngle extends MarketingAngleDraft {
   id: string;
   project_id: string;
   mass_desire_id: string;
   sort_order: number;
+  review_status: AngleReviewStatus;
+  is_shortlisted: boolean;
+  priority_score: number;
+  reviewer_notes: string;
   created_at: string;
+}
+
+export interface UpdateAngleReviewResponse {
+  angle: MarketingAngle;
 }
 
 export interface MarketingAngleGroup {

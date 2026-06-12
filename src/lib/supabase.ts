@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { normalizeProject } from "../types";
 import type {
   AdCopySet,
   CreativePromptSet,
@@ -56,7 +57,7 @@ export async function fetchProjects(): Promise<ProductProject[]> {
     throw new Error(error.message);
   }
 
-  return (data ?? []) as ProductProject[];
+  return ((data ?? []) as ProductProject[]).map(normalizeProject);
 }
 
 /**
@@ -70,9 +71,26 @@ export async function insertProject(
     throw new Error("Supabase is not configured.");
   }
 
+  // Write new fields, and mirror into legacy columns for backwards
+  // compatibility (existing readers + any NOT NULL legacy columns).
+  const payload = {
+    ...input,
+    product_name: input.our_product_name,
+    product_description: input.supplier_product_description,
+    competitor_url: input.primary_competitor_url,
+    product_price: input.planned_sale_price,
+    offer: input.current_offer,
+    target_customer: input.initial_customer_hypothesis,
+    main_problem: input.initial_problem_hypothesis,
+    brand_tone: input.preferred_tone,
+    claims_allowed: "",
+    claims_banned: "",
+    output_goal: "",
+  };
+
   const { data, error } = await supabase
     .from(PROJECTS_TABLE)
-    .insert(input)
+    .insert(payload)
     .select()
     .single();
 
@@ -80,7 +98,7 @@ export async function insertProject(
     throw new Error(error.message);
   }
 
-  return data as ProductProject;
+  return normalizeProject(data as ProductProject);
 }
 
 /**
@@ -220,7 +238,17 @@ export async function fetchMarketingAngles(
     throw new Error(error.message);
   }
 
-  return (data ?? []) as MarketingAngle[];
+  return (data ?? []).map(normalizeMarketingAngle);
+}
+
+function normalizeMarketingAngle(row: MarketingAngle): MarketingAngle {
+  return {
+    ...row,
+    review_status: row.review_status ?? "untested",
+    is_shortlisted: row.is_shortlisted ?? false,
+    priority_score: row.priority_score ?? 0,
+    reviewer_notes: row.reviewer_notes ?? "",
+  };
 }
 
 /** Fetch all saved ad copy sets for a project. */

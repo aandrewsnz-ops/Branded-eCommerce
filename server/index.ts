@@ -26,6 +26,7 @@ import {
 } from "./angles";
 import { generateAdCopy } from "./copy";
 import { generateCreativePrompts } from "./creative-prompts";
+import { normalizeProject } from "../src/types";
 import type {
   AdCopySet,
   CreativePromptSet,
@@ -95,7 +96,7 @@ app.post("/api/research/run", async (req, res) => {
     });
   }
 
-  const project = projectData as ProductProject;
+  const project = normalizeProject(projectData as ProductProject);
 
   // 2. Create a research_runs row (status: running, stage: research).
   const { data: runData, error: runError } = await supabase
@@ -219,7 +220,7 @@ app.post("/api/insights/generate", async (req, res) => {
     });
   }
 
-  const project = projectData as ProductProject;
+  const project = normalizeProject(projectData as ProductProject);
 
   // 3. Load the latest completed research run for the "research" stage.
   const { data: runData, error: runError } = await supabase
@@ -342,7 +343,7 @@ app.post("/api/avatar/generate", async (req, res) => {
     });
   }
 
-  const project = projectData as ProductProject;
+  const project = normalizeProject(projectData as ProductProject);
 
   const { data: insightData, error: insightError } = await supabase
     .from("research_insights")
@@ -452,7 +453,7 @@ app.post("/api/desires/generate", async (req, res) => {
     });
   }
 
-  const project = projectData as ProductProject;
+  const project = normalizeProject(projectData as ProductProject);
 
   const { data: insightData, error: insightError } = await supabase
     .from("research_insights")
@@ -608,7 +609,7 @@ app.post("/api/angles/generate", async (req, res) => {
     });
   }
 
-  const project = projectData as ProductProject;
+  const project = normalizeProject(projectData as ProductProject);
 
   const { data: insightData, error: insightError } = await supabase
     .from("research_insights")
@@ -765,6 +766,115 @@ app.post("/api/angles/generate", async (req, res) => {
   return res.json({ desires: grouped });
 });
 
+const VALID_REVIEW_STATUSES = new Set([
+  "untested",
+  "shortlisted",
+  "rejected",
+  "needs_copy",
+  "ready_for_creative",
+  "ready_to_publish",
+]);
+
+app.patch("/api/angles/:angleId/review", async (req, res) => {
+  const angleId = req.params.angleId;
+
+  if (typeof angleId !== "string" || angleId.trim().length === 0) {
+    return res.status(400).json({ error: "Missing or invalid angle id." });
+  }
+
+  let supabase: ReturnType<typeof getSupabase>;
+  try {
+    supabase = getSupabase();
+  } catch (error: unknown) {
+    return res.status(500).json({ error: errorMessage(error) });
+  }
+
+  const body = req.body as {
+    review_status?: unknown;
+    is_shortlisted?: unknown;
+    priority_score?: unknown;
+    reviewer_notes?: unknown;
+  };
+
+  const updates: Record<string, unknown> = {};
+
+  if (body.review_status !== undefined) {
+    if (
+      typeof body.review_status !== "string" ||
+      !VALID_REVIEW_STATUSES.has(body.review_status)
+    ) {
+      return res.status(400).json({
+        error:
+          "Invalid 'review_status'. Must be one of: untested, shortlisted, rejected, needs_copy, ready_for_creative, ready_to_publish.",
+      });
+    }
+    updates.review_status = body.review_status;
+  }
+
+  if (body.is_shortlisted !== undefined) {
+    if (typeof body.is_shortlisted !== "boolean") {
+      return res.status(400).json({
+        error: "Invalid 'is_shortlisted'. Must be a boolean.",
+      });
+    }
+    updates.is_shortlisted = body.is_shortlisted;
+  }
+
+  if (body.priority_score !== undefined) {
+    if (
+      typeof body.priority_score !== "number" ||
+      !Number.isInteger(body.priority_score) ||
+      body.priority_score < 0 ||
+      body.priority_score > 5
+    ) {
+      return res.status(400).json({
+        error: "Invalid 'priority_score'. Must be an integer from 0 to 5.",
+      });
+    }
+    updates.priority_score = body.priority_score;
+  }
+
+  if (body.reviewer_notes !== undefined) {
+    if (typeof body.reviewer_notes !== "string") {
+      return res.status(400).json({
+        error: "Invalid 'reviewer_notes'. Must be a string.",
+      });
+    }
+    updates.reviewer_notes = body.reviewer_notes;
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return res.status(400).json({
+      error:
+        "No valid fields to update. Provide review_status, is_shortlisted, priority_score, and/or reviewer_notes.",
+    });
+  }
+
+  const { data, error } = await supabase
+    .from("marketing_angles")
+    .update(updates)
+    .eq("id", angleId)
+    .select()
+    .single();
+
+  if (error || !data) {
+    return res.status(500).json({
+      error: `Failed to update angle review: ${error?.message ?? "unknown error"}`,
+    });
+  }
+
+  const angle = data as MarketingAngle;
+  return res.json({
+    angle: {
+      ...angle,
+      review_status: angle.review_status ?? "untested",
+      is_shortlisted: angle.is_shortlisted ?? false,
+      priority_score: angle.priority_score ?? 0,
+      reviewer_notes: angle.reviewer_notes ?? "",
+    },
+  });
+});
+
 app.post("/api/copy/generate", async (req, res) => {
   const body = req.body as {
     projectId?: unknown;
@@ -811,7 +921,7 @@ app.post("/api/copy/generate", async (req, res) => {
     });
   }
 
-  const project = projectData as ProductProject;
+  const project = normalizeProject(projectData as ProductProject);
 
   const { data: angleData, error: angleError } = await supabase
     .from("marketing_angles")
@@ -1003,7 +1113,7 @@ app.post("/api/creative-prompts/generate", async (req, res) => {
     });
   }
 
-  const project = projectData as ProductProject;
+  const project = normalizeProject(projectData as ProductProject);
 
   const { data: angleData, error: angleError } = await supabase
     .from("marketing_angles")
