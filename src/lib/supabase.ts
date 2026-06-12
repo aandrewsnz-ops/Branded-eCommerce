@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type {
+  AdCopySet,
   CustomerAvatarOutput,
   MassDesire,
   MarketingAngle,
@@ -219,4 +220,25 @@ export async function fetchMarketingAngles(
   }
 
   return (data ?? []) as MarketingAngle[];
+}
+
+/** Fetch all saved ad copy sets for a project. */
+export async function fetchAdCopySets(
+  projectId: string
+): Promise<AdCopySet[]> {
+  if (!supabase) {
+    return [];
+  }
+
+  const { data, error } = await supabase
+    .from("ad_copy_sets")
+    .select("*")
+    .eq("project_id", projectId)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data ?? []) as AdCopySet[];
 }

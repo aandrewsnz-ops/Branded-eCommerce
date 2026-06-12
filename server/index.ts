@@ -24,7 +24,9 @@ import {
   generateMarketingAngles,
   EXPECTED_ANGLES_PER_DESIRE,
 } from "./angles";
+import { generateAdCopy } from "./copy";
 import type {
+  AdCopySet,
   CustomerAvatarOutput,
   MassDesire,
   MassDesireWithAngles,
@@ -759,6 +761,192 @@ app.post("/api/angles/generate", async (req, res) => {
   }));
 
   return res.json({ desires: grouped });
+});
+
+app.post("/api/copy/generate", async (req, res) => {
+  const body = req.body as {
+    projectId?: unknown;
+    marketingAngleId?: unknown;
+  };
+  const projectId = body.projectId;
+  const marketingAngleId = body.marketingAngleId;
+
+  if (typeof projectId !== "string" || projectId.trim().length === 0) {
+    return res.status(400).json({ error: "Missing or invalid 'projectId'." });
+  }
+
+  if (
+    typeof marketingAngleId !== "string" ||
+    marketingAngleId.trim().length === 0
+  ) {
+    return res
+      .status(400)
+      .json({ error: "Missing or invalid 'marketingAngleId'." });
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    return res
+      .status(500)
+      .json({ error: "OPENAI_API_KEY is not set on the backend (.env.local)." });
+  }
+
+  let supabase: ReturnType<typeof getSupabase>;
+  try {
+    supabase = getSupabase();
+  } catch (error: unknown) {
+    return res.status(500).json({ error: errorMessage(error) });
+  }
+
+  const { data: projectData, error: projectError } = await supabase
+    .from("projects")
+    .select("*")
+    .eq("id", projectId)
+    .single();
+
+  if (projectError || !projectData) {
+    return res.status(404).json({
+      error: `Project not found: ${projectError?.message ?? projectId}`,
+    });
+  }
+
+  const project = projectData as ProductProject;
+
+  const { data: angleData, error: angleError } = await supabase
+    .from("marketing_angles")
+    .select("*")
+    .eq("id", marketingAngleId)
+    .single();
+
+  if (angleError || !angleData) {
+    return res.status(404).json({
+      error: `Marketing angle not found: ${angleError?.message ?? marketingAngleId}`,
+    });
+  }
+
+  const angle = angleData as MarketingAngle;
+
+  if (angle.project_id !== project.id) {
+    return res.status(400).json({
+      error: "Marketing angle does not belong to this project.",
+    });
+  }
+
+  const { data: desireData, error: desireError } = await supabase
+    .from("mass_desires")
+    .select("*")
+    .eq("id", angle.mass_desire_id)
+    .single();
+
+  if (desireError || !desireData) {
+    return res.status(404).json({
+      error: `Related mass desire not found: ${desireError?.message ?? angle.mass_desire_id}`,
+    });
+  }
+
+  const massDesire = desireData as MassDesire;
+
+  const { data: insightData, error: insightError } = await supabase
+    .from("research_insights")
+    .select("*")
+    .eq("project_id", project.id)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (insightError) {
+    return res.status(500).json({
+      error: `Failed to load insight report: ${insightError.message}`,
+    });
+  }
+
+  if (!insightData) {
+    return res.status(400).json({
+      error:
+        "No insight report found. Please run Generate Insight Report first.",
+    });
+  }
+
+  const insight = insightData as ResearchInsight;
+
+  const { data: avatarData, error: avatarError } = await supabase
+    .from("generated_outputs")
+    .select("*")
+    .eq("project_id", project.id)
+    .eq("output_type", "customer_avatar")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (avatarError) {
+    return res.status(500).json({
+      error: `Failed to load customer avatar: ${avatarError.message}`,
+    });
+  }
+
+  if (!avatarData) {
+    return res.status(400).json({
+      error:
+        "No customer avatar found. Please run Generate Customer Avatar first.",
+    });
+  }
+
+  const avatarOutput = avatarData as CustomerAvatarOutput;
+
+  let copyContent;
+  try {
+    copyContent = await generateAdCopy(
+      project,
+      insight,
+      avatarOutput.content_json,
+      massDesire,
+      angle
+    );
+  } catch (error: unknown) {
+    const message = errorMessage(error);
+    if (error instanceof ResearchParseError) {
+      return res.status(502).json({ error: message, raw: error.rawText });
+    }
+    return res.status(502).json({ error: message });
+  }
+
+  const { error: deleteCopyError } = await supabase
+    .from("ad_copy_sets")
+    .delete()
+    .eq("marketing_angle_id", marketingAngleId);
+
+  if (deleteCopyError) {
+    return res.status(500).json({
+      error: `Failed to clear old ad copy: ${deleteCopyError.message}`,
+    });
+  }
+
+  const { data: insertedData, error: insertError } = await supabase
+    .from("ad_copy_sets")
+    .insert({
+      project_id: project.id,
+      mass_desire_id: massDesire.id,
+      marketing_angle_id: angle.id,
+      run_id: insight.run_id ?? null,
+      long_form_story: copyContent.long_form_story,
+      short_primary_texts: copyContent.short_primary_texts,
+      medium_primary_texts: copyContent.medium_primary_texts,
+      headlines: copyContent.headlines,
+      descriptions: copyContent.descriptions,
+      hooks: copyContent.hooks,
+      hook_transitions: copyContent.hook_transitions,
+      callouts: copyContent.callouts,
+      compliance_notes: copyContent.compliance_notes,
+    })
+    .select()
+    .single();
+
+  if (insertError || !insertedData) {
+    return res.status(500).json({
+      error: `Failed to save ad copy set: ${insertError?.message ?? "unknown error"}`,
+    });
+  }
+
+  return res.json({ copySet: insertedData as AdCopySet });
 });
 
 app.listen(PORT, () => {

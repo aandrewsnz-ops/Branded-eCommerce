@@ -15,10 +15,13 @@ import {
   Tag,
   Loader2,
   AlertTriangle,
+  Copy,
+  Check,
 } from "lucide-react";
 import {
   fetchLatestCustomerAvatar,
   fetchLatestInsight,
+  fetchAdCopySets,
   fetchMassDesires,
   fetchMarketingAngles,
   fetchLatestResearchSources,
@@ -27,9 +30,11 @@ import {
   isSupabaseConfigured,
 } from "./lib/supabase";
 import type {
+  AdCopySet,
   CustomerAvatarOutput,
   GenerateAnglesResponse,
   GenerateAvatarResponse,
+  GenerateCopyResponse,
   GenerateDesiresResponse,
   GenerateInsightResponse,
   MarketingAngle,
@@ -50,7 +55,7 @@ const WORKFLOW_STAGES: readonly WorkflowStage[] = [
   { id: "customer_avatar", label: "Generate Customer Avatar" },
   { id: "mass_desires", label: "Generate Mass Desires" },
   { id: "marketing_angles", label: "Generate Marketing Angles" },
-  { id: "ad_copy", label: "Generate Ad Copy" },
+  { id: "ad_copy", label: "Generate Quick Copy" },
   { id: "creative_prompts", label: "Generate Creative Prompts" },
   { id: "compliance_check", label: "Run Compliance Check" },
   { id: "export_ad_pack", label: "Export Ad Pack" },
@@ -189,6 +194,14 @@ function App() {
     null
   );
   const [anglesError, setAnglesError] = useState<string | null>(null);
+
+  const [copySetsByProject, setCopySetsByProject] = useState<
+    Record<string, AdCopySet[]>
+  >({});
+  const [generatingCopyAngleId, setGeneratingCopyAngleId] = useState<
+    string | null
+  >(null);
+  const [copyError, setCopyError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isSupabaseConfigured) {
@@ -355,7 +368,8 @@ function App() {
     }
     if (
       selectedId in desiresByProject &&
-      selectedId in anglesByProject
+      selectedId in anglesByProject &&
+      selectedId in copySetsByProject
     ) {
       return;
     }
@@ -366,14 +380,17 @@ function App() {
       setDesiresLoadingId(selectedId);
       setDesiresError(null);
       setAnglesError(null);
+      setCopyError(null);
       try {
-        const [desires, angles] = await Promise.all([
+        const [desires, angles, copySets] = await Promise.all([
           fetchMassDesires(selectedId),
           fetchMarketingAngles(selectedId),
+          fetchAdCopySets(selectedId),
         ]);
         if (cancelled) return;
         setDesiresByProject((prev) => ({ ...prev, [selectedId]: desires }));
         setAnglesByProject((prev) => ({ ...prev, [selectedId]: angles }));
+        setCopySetsByProject((prev) => ({ ...prev, [selectedId]: copySets }));
       } catch (err: unknown) {
         if (cancelled) return;
         setDesiresError(
@@ -395,7 +412,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedId, desiresByProject, anglesByProject]);
+  }, [selectedId, desiresByProject, anglesByProject, copySetsByProject]);
 
   function updateField<K extends keyof ProductProjectInput>(
     key: K,
@@ -605,6 +622,7 @@ function App() {
       const data = payload as GenerateDesiresResponse;
       setDesiresByProject((prev) => ({ ...prev, [projectId]: data.desires }));
       setAnglesByProject((prev) => ({ ...prev, [projectId]: [] }));
+      setCopySetsByProject((prev) => ({ ...prev, [projectId]: [] }));
       setStatusMessage("Mass desires generated.");
     } catch (err: unknown) {
       setDesiresError(
@@ -648,6 +666,7 @@ function App() {
         ...prev,
         [projectId]: data.desires.flatMap((group) => group.angles),
       }));
+      setCopySetsByProject((prev) => ({ ...prev, [projectId]: [] }));
       setStatusMessage(
         `Marketing angles generated: ${data.desires.reduce((n, g) => n + g.angles.length, 0)} angles.`
       );
@@ -658,6 +677,52 @@ function App() {
     } finally {
       setGeneratingAnglesId((current) =>
         current === projectId ? null : current
+      );
+    }
+  }
+
+  async function handleGenerateCopy(
+    projectId: string,
+    marketingAngleId: string
+  ) {
+    setStatusMessage(null);
+    setCopyError(null);
+    setGeneratingCopyAngleId(marketingAngleId);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/copy/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId, marketingAngleId }),
+      });
+
+      const payload: unknown = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        const message =
+          payload && typeof payload === "object" && "error" in payload
+            ? String((payload as { error: unknown }).error)
+            : `Ad copy failed (HTTP ${res.status}).`;
+        throw new Error(message);
+      }
+
+      const data = payload as GenerateCopyResponse;
+      setCopySetsByProject((prev) => {
+        const existing = prev[projectId] ?? [];
+        const filtered = existing.filter(
+          (set) => set.marketing_angle_id !== marketingAngleId
+        );
+        return {
+          ...prev,
+          [projectId]: [data.copySet, ...filtered],
+        };
+      });
+      setStatusMessage("Quick copy generated.");
+    } catch (err: unknown) {
+      setCopyError(err instanceof Error ? err.message : "Ad copy failed.");
+    } finally {
+      setGeneratingCopyAngleId((current) =>
+        current === marketingAngleId ? null : current
       );
     }
   }
@@ -874,6 +939,12 @@ function App() {
               anglesError={anglesError}
               desires={desiresByProject[selectedProject.id] ?? []}
               angles={anglesByProject[selectedProject.id] ?? []}
+              copySets={copySetsByProject[selectedProject.id] ?? []}
+              generatingCopyAngleId={generatingCopyAngleId}
+              copyError={copyError}
+              onGenerateCopy={(angleId) =>
+                handleGenerateCopy(selectedProject.id, angleId)
+              }
             />
           ) : (
             <div className="empty-state">
@@ -963,6 +1034,10 @@ interface ProjectDetailProps {
   anglesError: string | null;
   desires: MassDesire[];
   angles: MarketingAngle[];
+  copySets: AdCopySet[];
+  generatingCopyAngleId: string | null;
+  copyError: string | null;
+  onGenerateCopy: (marketingAngleId: string) => void;
 }
 
 function ProjectDetail({
@@ -988,6 +1063,10 @@ function ProjectDetail({
   anglesError,
   desires,
   angles,
+  copySets,
+  generatingCopyAngleId,
+  copyError,
+  onGenerateCopy,
 }: ProjectDetailProps) {
   return (
     <div className="detail">
@@ -1099,8 +1178,12 @@ function ProjectDetail({
         isLoading={isDesiresLoading}
         desiresError={desiresError}
         anglesError={anglesError}
+        copyError={copyError}
         desires={desires}
         angles={angles}
+        copySets={copySets}
+        generatingCopyAngleId={generatingCopyAngleId}
+        onGenerateCopy={onGenerateCopy}
       />
     </div>
   );
@@ -1654,8 +1737,12 @@ interface MassDesiresPanelProps {
   isLoading: boolean;
   desiresError: string | null;
   anglesError: string | null;
+  copyError: string | null;
   desires: MassDesire[];
   angles: MarketingAngle[];
+  copySets: AdCopySet[];
+  generatingCopyAngleId: string | null;
+  onGenerateCopy: (marketingAngleId: string) => void;
 }
 
 function MassDesiresPanel({
@@ -1664,9 +1751,17 @@ function MassDesiresPanel({
   isLoading,
   desiresError,
   anglesError,
+  copyError,
   desires,
   angles,
+  copySets,
+  generatingCopyAngleId,
+  onGenerateCopy,
 }: MassDesiresPanelProps) {
+  const [fullCopyPlaceholderId, setFullCopyPlaceholderId] = useState<
+    string | null
+  >(null);
+
   const hasContent =
     isGeneratingDesires ||
     isGeneratingAngles ||
@@ -1704,6 +1799,13 @@ function MassDesiresPanel({
         <div className="banner banner-error" role="alert">
           <AlertTriangle size={16} />
           <span>{anglesError}</span>
+        </div>
+      ) : null}
+
+      {copyError ? (
+        <div className="banner banner-error" role="alert">
+          <AlertTriangle size={16} />
+          <span>{copyError}</span>
         </div>
       ) : null}
 
@@ -1784,60 +1886,367 @@ function MassDesiresPanel({
                     <h5 className="angle-list-title">
                       Marketing angles ({desireAngles.length})
                     </h5>
-                    {desireAngles.map((angle) => (
-                      <div key={angle.id} className="angle-card">
-                        <header className="angle-card-head">
-                          <h6 className="angle-name">{angle.angle_name}</h6>
-                          <span className="stage-index">
-                            {angle.sort_order + 1}
-                          </span>
-                        </header>
-                        <p className="insight-text">
-                          <strong>Target audience:</strong>{" "}
-                          {angle.target_audience}
-                        </p>
-                        <p className="insight-text">
-                          <strong>Story arc:</strong> {angle.story_arc}
-                        </p>
-                        <p className="insight-text">
-                          <strong>Crisis / realization:</strong>{" "}
-                          {angle.crisis_or_realization_moment}
-                        </p>
-                        <p className="insight-text">
-                          <strong>Unique problem mechanism:</strong>{" "}
-                          {angle.unique_problem_mechanism}
-                        </p>
-                        <p className="insight-text">
-                          <strong>Unique solution mechanism:</strong>{" "}
-                          {angle.unique_solution_mechanism}
-                        </p>
-                        <p className="insight-text">
-                          <strong>Key emotional moment:</strong>{" "}
-                          {angle.key_emotional_moment}
-                        </p>
-                        <p className="insight-text">
-                          <strong>Copy direction:</strong>{" "}
-                          {angle.copy_direction}
-                        </p>
-                        <p className="insight-text">
-                          <strong>Creative direction:</strong>{" "}
-                          {angle.creative_direction}
-                        </p>
-                        {angle.compliance_notes.length > 0 ? (
-                          <ul className="bullet-list">
-                            {angle.compliance_notes.map((note, i) => (
-                              <li key={i}>{note}</li>
-                            ))}
-                          </ul>
-                        ) : null}
-                      </div>
-                    ))}
+                    {desireAngles.map((angle) => {
+                      const isGeneratingCopy =
+                        generatingCopyAngleId === angle.id;
+                      const copySet = copySets.find(
+                        (set) => set.marketing_angle_id === angle.id
+                      );
+
+                      return (
+                        <div key={angle.id} className="angle-card">
+                          <header className="angle-card-head">
+                            <h6 className="angle-name">{angle.angle_name}</h6>
+                            <span className="stage-index">
+                              {angle.sort_order + 1}
+                            </span>
+                          </header>
+                          <p className="insight-text">
+                            <strong>Target audience:</strong>{" "}
+                            {angle.target_audience}
+                          </p>
+                          <p className="insight-text">
+                            <strong>Story arc:</strong> {angle.story_arc}
+                          </p>
+                          <p className="insight-text">
+                            <strong>Crisis / realization:</strong>{" "}
+                            {angle.crisis_or_realization_moment}
+                          </p>
+                          <p className="insight-text">
+                            <strong>Unique problem mechanism:</strong>{" "}
+                            {angle.unique_problem_mechanism}
+                          </p>
+                          <p className="insight-text">
+                            <strong>Unique solution mechanism:</strong>{" "}
+                            {angle.unique_solution_mechanism}
+                          </p>
+                          <p className="insight-text">
+                            <strong>Key emotional moment:</strong>{" "}
+                            {angle.key_emotional_moment}
+                          </p>
+                          <p className="insight-text">
+                            <strong>Copy direction:</strong>{" "}
+                            {angle.copy_direction}
+                          </p>
+                          <p className="insight-text">
+                            <strong>Creative direction:</strong>{" "}
+                            {angle.creative_direction}
+                          </p>
+                          {angle.compliance_notes.length > 0 ? (
+                            <ul className="bullet-list">
+                              {angle.compliance_notes.map((note, i) => (
+                                <li key={i}>{note}</li>
+                              ))}
+                            </ul>
+                          ) : null}
+
+                          <div className="angle-actions">
+                            <button
+                              type="button"
+                              className="btn btn-primary btn-sm"
+                              onClick={() => {
+                                setFullCopyPlaceholderId(null);
+                                onGenerateCopy(angle.id);
+                              }}
+                              disabled={isGeneratingCopy}
+                            >
+                              {isGeneratingCopy ? (
+                                <Loader2
+                                  size={14}
+                                  strokeWidth={2.5}
+                                  className="spin"
+                                />
+                              ) : (
+                                <PenLine size={14} strokeWidth={2.5} />
+                              )}
+                              {isGeneratingCopy
+                                ? "Generating quick copy…"
+                                : "Generate Quick Copy"}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              onClick={() =>
+                                setFullCopyPlaceholderId(angle.id)
+                              }
+                              disabled={isGeneratingCopy}
+                            >
+                              Expand Full Copy Pack
+                            </button>
+                          </div>
+
+                          {fullCopyPlaceholderId === angle.id ? (
+                            <p className="status-message status-idle angle-placeholder">
+                              Full copy pack coming next
+                            </p>
+                          ) : null}
+
+                          {copySet ? (
+                            <QuickCopyDisplay copySet={copySet} />
+                          ) : null}
+                        </div>
+                      );
+                    })}
                   </div>
                 ) : null}
               </article>
             );
           })}
         </div>
+      ) : null}
+    </div>
+  );
+}
+
+interface CopyButtonProps {
+  text: string;
+  label?: string;
+}
+
+function CopyButton({ text, label = "Copy" }: CopyButtonProps) {
+  const [copied, setCopied] = useState(false);
+
+  async function handleCopy() {
+    if (!text.trim()) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard API may be unavailable; fail silently.
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      className="btn-copy"
+      onClick={() => void handleCopy()}
+      disabled={!text.trim()}
+    >
+      {copied ? <Check size={12} /> : <Copy size={12} />}
+      {copied ? "Copied" : label}
+    </button>
+  );
+}
+
+interface CopyBlockProps {
+  text: string;
+  label?: string;
+}
+
+function CopyBlock({ text, label }: CopyBlockProps) {
+  if (!text.trim()) return null;
+  return (
+    <div className="copy-block">
+      <div className="copy-block-head">
+        {label ? <span className="copy-block-label">{label}</span> : null}
+        <CopyButton text={text} />
+      </div>
+      <p className="copy-block-text">{text}</p>
+    </div>
+  );
+}
+
+function quickCopyWordCount(text: string): number {
+  return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
+interface CollapsibleInsightSectionProps {
+  title: string;
+  children: React.ReactNode;
+  defaultCollapsed?: boolean;
+}
+
+function CollapsibleInsightSection({
+  title,
+  children,
+  defaultCollapsed = false,
+}: CollapsibleInsightSectionProps) {
+  const [open, setOpen] = useState(!defaultCollapsed);
+
+  return (
+    <section className="insight-section collapsible-section">
+      <button
+        type="button"
+        className="collapsible-head"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+      >
+        <h4 className="insight-section-title">{title}</h4>
+        <span className="collapsible-toggle">{open ? "Hide" : "Show"}</span>
+      </button>
+      {open ? <div className="insight-section-body">{children}</div> : null}
+    </section>
+  );
+}
+
+interface QuickCopyDisplayProps {
+  copySet: AdCopySet;
+}
+
+function QuickCopyDisplay({ copySet }: QuickCopyDisplayProps) {
+  const isLegacyLongStory =
+    quickCopyWordCount(copySet.long_form_story) > 120;
+  const hasLegacyHookTransitions = copySet.hook_transitions.length > 0;
+  const isLegacyLargeHooks = copySet.hooks.length > 5;
+  const isLegacyLargeHeadlines = copySet.headlines.length > 5;
+  const isLegacyLargeShortTexts = copySet.short_primary_texts.length > 3;
+  const isLegacyLargeMediumTexts = copySet.medium_primary_texts.length > 2;
+
+  return (
+    <div className="copy-set copy-set-quick">
+      <div className="copy-set-head">
+        <h6 className="angle-list-title">Quick copy pack</h6>
+        <span className="insight-date">
+          {new Date(copySet.created_at).toLocaleString()}
+        </span>
+      </div>
+
+      {copySet.long_form_story.trim() ? (
+        <CollapsibleInsightSection
+          title="Core ad concept"
+          defaultCollapsed={isLegacyLongStory}
+        >
+          <CopyBlock text={copySet.long_form_story} />
+        </CollapsibleInsightSection>
+      ) : null}
+
+      {copySet.short_primary_texts.length > 0 ? (
+        <CollapsibleInsightSection
+          title={`Short primary texts (${copySet.short_primary_texts.length})`}
+          defaultCollapsed={isLegacyLargeShortTexts}
+        >
+          {copySet.short_primary_texts.map((item, i) => (
+            <div key={i} className="insight-card insight-card-compact">
+              <div className="copy-block-head">
+                <h5 className="insight-card-title">
+                  {item.label || `Short ${i + 1}`}
+                </h5>
+                <CopyButton text={item.text} />
+              </div>
+              <p className="copy-block-text copy-block-text-compact">
+                {item.text}
+              </p>
+            </div>
+          ))}
+        </CollapsibleInsightSection>
+      ) : null}
+
+      {copySet.medium_primary_texts.length > 0 ? (
+        <CollapsibleInsightSection
+          title={`Medium primary texts (${copySet.medium_primary_texts.length})`}
+          defaultCollapsed={isLegacyLargeMediumTexts}
+        >
+          {copySet.medium_primary_texts.map((item, i) => (
+            <div key={i} className="insight-card insight-card-compact">
+              <div className="copy-block-head">
+                <h5 className="insight-card-title">
+                  {item.label || `Medium ${i + 1}`}
+                </h5>
+                <CopyButton text={item.text} />
+              </div>
+              <p className="copy-block-text copy-block-text-compact">
+                {item.text}
+              </p>
+            </div>
+          ))}
+        </CollapsibleInsightSection>
+      ) : null}
+
+      {copySet.headlines.length > 0 ? (
+        <CollapsibleInsightSection
+          title={`Headlines (${copySet.headlines.length})`}
+          defaultCollapsed={isLegacyLargeHeadlines}
+        >
+          <ul className="copy-list">
+            {copySet.headlines.map((item, i) => (
+              <li key={i} className="copy-list-item">
+                <span>{item.text}</span>
+                <CopyButton text={item.text} label="Copy" />
+              </li>
+            ))}
+          </ul>
+        </CollapsibleInsightSection>
+      ) : null}
+
+      {copySet.descriptions.length > 0 ? (
+        <CollapsibleInsightSection
+          title={`Descriptions (${copySet.descriptions.length})`}
+        >
+          <ul className="copy-list">
+            {copySet.descriptions.map((item, i) => (
+              <li key={i} className="copy-list-item">
+                <span>{item.text}</span>
+                <CopyButton text={item.text} label="Copy" />
+              </li>
+            ))}
+          </ul>
+        </CollapsibleInsightSection>
+      ) : null}
+
+      {copySet.hooks.length > 0 ? (
+        <CollapsibleInsightSection
+          title={`Hooks (${copySet.hooks.length})`}
+          defaultCollapsed={isLegacyLargeHooks}
+        >
+          <ul className="copy-list">
+            {copySet.hooks.map((hook, i) => (
+              <li key={i} className="copy-list-item copy-list-item-hook">
+                <span>“{hook.text}”</span>
+                <CopyButton text={hook.text} label="Copy" />
+              </li>
+            ))}
+          </ul>
+        </CollapsibleInsightSection>
+      ) : null}
+
+      {hasLegacyHookTransitions ? (
+        <CollapsibleInsightSection
+          title={`Hook transitions (${copySet.hook_transitions.length})`}
+          defaultCollapsed
+        >
+          {copySet.hook_transitions.map((transition, i) => (
+            <div key={i} className="insight-card insight-card-compact">
+              <div className="copy-block-head">
+                <h5 className="insight-card-title">Hook: {transition.hook}</h5>
+                <CopyButton text={transition.transition_paragraph} />
+              </div>
+              <p className="copy-block-text">{transition.transition_paragraph}</p>
+            </div>
+          ))}
+        </CollapsibleInsightSection>
+      ) : null}
+
+      {copySet.callouts.length > 0 ? (
+        <CollapsibleInsightSection title={`Callouts (${copySet.callouts.length})`}>
+          <ul className="copy-list">
+            {copySet.callouts.map((callout, i) => (
+              <li key={i} className="copy-list-item">
+                <span>
+                  <span className="meta-chip">{callout.use_case}</span>{" "}
+                  {callout.text}
+                </span>
+                <CopyButton text={callout.text} label="Copy" />
+              </li>
+            ))}
+          </ul>
+        </CollapsibleInsightSection>
+      ) : null}
+
+      {copySet.compliance_notes.length > 0 ? (
+        <CollapsibleInsightSection
+          title={`Compliance (${copySet.compliance_notes.length})`}
+        >
+          {copySet.compliance_notes.map((note, i) => (
+            <div key={i} className="insight-card insight-card-warning insight-card-compact">
+              <h5 className="insight-card-title">{note.risk}</h5>
+              <p className="insight-text">
+                <strong>Safer:</strong> {note.safer_direction}
+              </p>
+            </div>
+          ))}
+        </CollapsibleInsightSection>
       ) : null}
     </div>
   );

@@ -287,3 +287,68 @@ export interface MassDesireWithAngles {
 export interface GenerateAnglesResponse {
   desires: MassDesireWithAngles[];
 }
+
+export interface PrimaryTextVariant {
+  label: string;
+  text: string;
+  strategy: string;
+}
+
+export interface HeadlineVariant {
+  text: string;
+  angle: string;
+}
+
+export interface DescriptionVariant {
+  text: string;
+  angle: string;
+}
+
+export interface HookVariant {
+  text: string;
+  why_it_works: string;
+}
+
+export interface HookTransition {
+  hook: string;
+  transition_paragraph: string;
+  flows_into: string;
+}
+
+export interface Callout {
+  text: string;
+  use_case: string;
+}
+
+export interface CopyComplianceNote {
+  risk: string;
+  why_it_matters: string;
+  safer_direction: string;
+}
+
+/** Ad copy content produced by OpenAI (before DB metadata). */
+export interface AdCopyContent {
+  long_form_story: string;
+  short_primary_texts: PrimaryTextVariant[];
+  medium_primary_texts: PrimaryTextVariant[];
+  headlines: HeadlineVariant[];
+  descriptions: DescriptionVariant[];
+  hooks: HookVariant[];
+  hook_transitions: HookTransition[];
+  callouts: Callout[];
+  compliance_notes: CopyComplianceNote[];
+}
+
+/** A saved row from the ad_copy_sets table. */
+export interface AdCopySet extends AdCopyContent {
+  id: string;
+  project_id: string;
+  mass_desire_id: string;
+  marketing_angle_id: string;
+  run_id: string | null;
+  created_at: string;
+}
+
+export interface GenerateCopyResponse {
+  copySet: AdCopySet;
+}
