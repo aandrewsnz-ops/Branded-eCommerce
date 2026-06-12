@@ -22,6 +22,7 @@ import {
   fetchLatestCustomerAvatar,
   fetchLatestInsight,
   fetchAdCopySets,
+  fetchCreativePromptSets,
   fetchMassDesires,
   fetchMarketingAngles,
   fetchLatestResearchSources,
@@ -31,10 +32,12 @@ import {
 } from "./lib/supabase";
 import type {
   AdCopySet,
+  CreativePromptSet,
   CustomerAvatarOutput,
   GenerateAnglesResponse,
   GenerateAvatarResponse,
   GenerateCopyResponse,
+  GenerateCreativePromptsResponse,
   GenerateDesiresResponse,
   GenerateInsightResponse,
   MarketingAngle,
@@ -203,6 +206,14 @@ function App() {
   >(null);
   const [copyError, setCopyError] = useState<string | null>(null);
 
+  const [creativePromptSetsByProject, setCreativePromptSetsByProject] =
+    useState<Record<string, CreativePromptSet[]>>({});
+  const [generatingCreativePromptAngleId, setGeneratingCreativePromptAngleId] =
+    useState<string | null>(null);
+  const [creativePromptError, setCreativePromptError] = useState<string | null>(
+    null
+  );
+
   useEffect(() => {
     if (!isSupabaseConfigured) {
       return;
@@ -369,7 +380,8 @@ function App() {
     if (
       selectedId in desiresByProject &&
       selectedId in anglesByProject &&
-      selectedId in copySetsByProject
+      selectedId in copySetsByProject &&
+      selectedId in creativePromptSetsByProject
     ) {
       return;
     }
@@ -381,16 +393,23 @@ function App() {
       setDesiresError(null);
       setAnglesError(null);
       setCopyError(null);
+      setCreativePromptError(null);
       try {
-        const [desires, angles, copySets] = await Promise.all([
-          fetchMassDesires(selectedId),
-          fetchMarketingAngles(selectedId),
-          fetchAdCopySets(selectedId),
-        ]);
+        const [desires, angles, copySets, creativePromptSets] =
+          await Promise.all([
+            fetchMassDesires(selectedId),
+            fetchMarketingAngles(selectedId),
+            fetchAdCopySets(selectedId),
+            fetchCreativePromptSets(selectedId),
+          ]);
         if (cancelled) return;
         setDesiresByProject((prev) => ({ ...prev, [selectedId]: desires }));
         setAnglesByProject((prev) => ({ ...prev, [selectedId]: angles }));
         setCopySetsByProject((prev) => ({ ...prev, [selectedId]: copySets }));
+        setCreativePromptSetsByProject((prev) => ({
+          ...prev,
+          [selectedId]: creativePromptSets,
+        }));
       } catch (err: unknown) {
         if (cancelled) return;
         setDesiresError(
@@ -412,7 +431,13 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedId, desiresByProject, anglesByProject, copySetsByProject]);
+  }, [
+    selectedId,
+    desiresByProject,
+    anglesByProject,
+    copySetsByProject,
+    creativePromptSetsByProject,
+  ]);
 
   function updateField<K extends keyof ProductProjectInput>(
     key: K,
@@ -623,6 +648,7 @@ function App() {
       setDesiresByProject((prev) => ({ ...prev, [projectId]: data.desires }));
       setAnglesByProject((prev) => ({ ...prev, [projectId]: [] }));
       setCopySetsByProject((prev) => ({ ...prev, [projectId]: [] }));
+      setCreativePromptSetsByProject((prev) => ({ ...prev, [projectId]: [] }));
       setStatusMessage("Mass desires generated.");
     } catch (err: unknown) {
       setDesiresError(
@@ -667,6 +693,7 @@ function App() {
         [projectId]: data.desires.flatMap((group) => group.angles),
       }));
       setCopySetsByProject((prev) => ({ ...prev, [projectId]: [] }));
+      setCreativePromptSetsByProject((prev) => ({ ...prev, [projectId]: [] }));
       setStatusMessage(
         `Marketing angles generated: ${data.desires.reduce((n, g) => n + g.angles.length, 0)} angles.`
       );
@@ -717,11 +744,67 @@ function App() {
           [projectId]: [data.copySet, ...filtered],
         };
       });
+      setCreativePromptSetsByProject((prev) => {
+        const existing = prev[projectId] ?? [];
+        const filtered = existing.filter(
+          (set) => set.marketing_angle_id !== marketingAngleId
+        );
+        return { ...prev, [projectId]: filtered };
+      });
       setStatusMessage("Quick copy generated.");
     } catch (err: unknown) {
       setCopyError(err instanceof Error ? err.message : "Ad copy failed.");
     } finally {
       setGeneratingCopyAngleId((current) =>
+        current === marketingAngleId ? null : current
+      );
+    }
+  }
+
+  async function handleGenerateCreativePrompts(
+    projectId: string,
+    marketingAngleId: string,
+    adCopySetId: string
+  ) {
+    setStatusMessage(null);
+    setCreativePromptError(null);
+    setGeneratingCreativePromptAngleId(marketingAngleId);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/creative-prompts/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId, marketingAngleId, adCopySetId }),
+      });
+
+      const payload: unknown = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        const message =
+          payload && typeof payload === "object" && "error" in payload
+            ? String((payload as { error: unknown }).error)
+            : `Creative prompts failed (HTTP ${res.status}).`;
+        throw new Error(message);
+      }
+
+      const data = payload as GenerateCreativePromptsResponse;
+      setCreativePromptSetsByProject((prev) => {
+        const existing = prev[projectId] ?? [];
+        const filtered = existing.filter(
+          (set) => set.ad_copy_set_id !== adCopySetId
+        );
+        return {
+          ...prev,
+          [projectId]: [data.promptSet, ...filtered],
+        };
+      });
+      setStatusMessage("Creative prompts generated.");
+    } catch (err: unknown) {
+      setCreativePromptError(
+        err instanceof Error ? err.message : "Creative prompts failed."
+      );
+    } finally {
+      setGeneratingCreativePromptAngleId((current) =>
         current === marketingAngleId ? null : current
       );
     }
@@ -945,6 +1028,18 @@ function App() {
               onGenerateCopy={(angleId) =>
                 handleGenerateCopy(selectedProject.id, angleId)
               }
+              creativePromptSets={
+                creativePromptSetsByProject[selectedProject.id] ?? []
+              }
+              generatingCreativePromptAngleId={generatingCreativePromptAngleId}
+              creativePromptError={creativePromptError}
+              onGenerateCreativePrompts={(angleId, copySetId) =>
+                handleGenerateCreativePrompts(
+                  selectedProject.id,
+                  angleId,
+                  copySetId
+                )
+              }
             />
           ) : (
             <div className="empty-state">
@@ -1038,6 +1133,13 @@ interface ProjectDetailProps {
   generatingCopyAngleId: string | null;
   copyError: string | null;
   onGenerateCopy: (marketingAngleId: string) => void;
+  creativePromptSets: CreativePromptSet[];
+  generatingCreativePromptAngleId: string | null;
+  creativePromptError: string | null;
+  onGenerateCreativePrompts: (
+    marketingAngleId: string,
+    adCopySetId: string
+  ) => void;
 }
 
 function ProjectDetail({
@@ -1067,6 +1169,10 @@ function ProjectDetail({
   generatingCopyAngleId,
   copyError,
   onGenerateCopy,
+  creativePromptSets,
+  generatingCreativePromptAngleId,
+  creativePromptError,
+  onGenerateCreativePrompts,
 }: ProjectDetailProps) {
   return (
     <div className="detail">
@@ -1184,6 +1290,10 @@ function ProjectDetail({
         copySets={copySets}
         generatingCopyAngleId={generatingCopyAngleId}
         onGenerateCopy={onGenerateCopy}
+        creativePromptSets={creativePromptSets}
+        generatingCreativePromptAngleId={generatingCreativePromptAngleId}
+        creativePromptError={creativePromptError}
+        onGenerateCreativePrompts={onGenerateCreativePrompts}
       />
     </div>
   );
@@ -1743,6 +1853,13 @@ interface MassDesiresPanelProps {
   copySets: AdCopySet[];
   generatingCopyAngleId: string | null;
   onGenerateCopy: (marketingAngleId: string) => void;
+  creativePromptSets: CreativePromptSet[];
+  generatingCreativePromptAngleId: string | null;
+  creativePromptError: string | null;
+  onGenerateCreativePrompts: (
+    marketingAngleId: string,
+    adCopySetId: string
+  ) => void;
 }
 
 function MassDesiresPanel({
@@ -1757,6 +1874,10 @@ function MassDesiresPanel({
   copySets,
   generatingCopyAngleId,
   onGenerateCopy,
+  creativePromptSets,
+  generatingCreativePromptAngleId,
+  creativePromptError,
+  onGenerateCreativePrompts,
 }: MassDesiresPanelProps) {
   const [fullCopyPlaceholderId, setFullCopyPlaceholderId] = useState<
     string | null
@@ -1806,6 +1927,13 @@ function MassDesiresPanel({
         <div className="banner banner-error" role="alert">
           <AlertTriangle size={16} />
           <span>{copyError}</span>
+        </div>
+      ) : null}
+
+      {creativePromptError ? (
+        <div className="banner banner-error" role="alert">
+          <AlertTriangle size={16} />
+          <span>{creativePromptError}</span>
         </div>
       ) : null}
 
@@ -1889,9 +2017,16 @@ function MassDesiresPanel({
                     {desireAngles.map((angle) => {
                       const isGeneratingCopy =
                         generatingCopyAngleId === angle.id;
+                      const isGeneratingCreativePrompts =
+                        generatingCreativePromptAngleId === angle.id;
                       const copySet = copySets.find(
                         (set) => set.marketing_angle_id === angle.id
                       );
+                      const promptSet = copySet
+                        ? creativePromptSets.find(
+                            (set) => set.ad_copy_set_id === copySet.id
+                          )
+                        : undefined;
 
                       return (
                         <div key={angle.id} className="angle-card">
@@ -1983,6 +2118,46 @@ function MassDesiresPanel({
 
                           {copySet ? (
                             <QuickCopyDisplay copySet={copySet} />
+                          ) : null}
+
+                          <div className="angle-actions angle-actions-creative">
+                            {copySet ? (
+                              <button
+                                type="button"
+                                className="btn btn-primary btn-sm"
+                                onClick={() =>
+                                  onGenerateCreativePrompts(
+                                    angle.id,
+                                    copySet.id
+                                  )
+                                }
+                                disabled={
+                                  isGeneratingCopy ||
+                                  isGeneratingCreativePrompts
+                                }
+                              >
+                                {isGeneratingCreativePrompts ? (
+                                  <Loader2
+                                    size={14}
+                                    strokeWidth={2.5}
+                                    className="spin"
+                                  />
+                                ) : (
+                                  <Sparkles size={14} strokeWidth={2.5} />
+                                )}
+                                {isGeneratingCreativePrompts
+                                  ? "Generating creative prompts…"
+                                  : "Generate Creative Prompts"}
+                              </button>
+                            ) : (
+                              <p className="status-message status-idle angle-placeholder">
+                                Generate Quick Copy first
+                              </p>
+                            )}
+                          </div>
+
+                          {promptSet ? (
+                            <CreativePromptsDisplay promptSet={promptSet} />
                           ) : null}
                         </div>
                       );
@@ -2240,6 +2415,201 @@ function QuickCopyDisplay({ copySet }: QuickCopyDisplayProps) {
         >
           {copySet.compliance_notes.map((note, i) => (
             <div key={i} className="insight-card insight-card-warning insight-card-compact">
+              <h5 className="insight-card-title">{note.risk}</h5>
+              <p className="insight-text">
+                <strong>Safer:</strong> {note.safer_direction}
+              </p>
+            </div>
+          ))}
+        </CollapsibleInsightSection>
+      ) : null}
+    </div>
+  );
+}
+
+function formatImagePromptForCopy(prompt: {
+  concept_name: string;
+  aspect_ratio: string;
+  prompt: string;
+  overlay_text: string;
+  style_notes: string;
+}): string {
+  return [
+    `${prompt.concept_name} (${prompt.aspect_ratio})`,
+    "",
+    prompt.prompt,
+    "",
+    prompt.overlay_text ? `Overlay: ${prompt.overlay_text}` : "",
+    prompt.style_notes ? `Style: ${prompt.style_notes}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function formatUgcScriptForCopy(script: {
+  script_name: string;
+  duration: string;
+  hook: string;
+  script: string;
+  shot_list: string[];
+  caption: string;
+}): string {
+  return [
+    `${script.script_name} (${script.duration})`,
+    "",
+    `Hook: ${script.hook}`,
+    "",
+    script.script,
+    "",
+    script.shot_list.length > 0
+      ? `Shot list:\n${script.shot_list.map((shot) => `- ${shot}`).join("\n")}`
+      : "",
+    "",
+    script.caption ? `Caption: ${script.caption}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+interface CreativePromptsDisplayProps {
+  promptSet: CreativePromptSet;
+}
+
+function CreativePromptsDisplay({ promptSet }: CreativePromptsDisplayProps) {
+  return (
+    <div className="copy-set creative-prompt-set">
+      <div className="copy-set-head">
+        <h6 className="angle-list-title">Creative prompt pack</h6>
+        <span className="insight-date">
+          {new Date(promptSet.created_at).toLocaleString()}
+        </span>
+      </div>
+
+      {promptSet.creative_concepts.length > 0 ? (
+        <CollapsibleInsightSection
+          title={`Creative concepts (${promptSet.creative_concepts.length})`}
+        >
+          {promptSet.creative_concepts.map((concept, i) => (
+            <div key={i} className="insight-card insight-card-compact">
+              <h5 className="insight-card-title">{concept.concept_name}</h5>
+              <p className="insight-text">
+                <span className="meta-chip">{concept.format}</span>{" "}
+                <span className="meta-chip">{concept.recommended_use}</span>
+              </p>
+              <p className="insight-text">
+                <strong>Core idea:</strong> {concept.core_idea}
+              </p>
+              <p className="insight-text">
+                <strong>Why it matches:</strong>{" "}
+                {concept.why_it_matches_the_angle}
+              </p>
+              <p className="insight-text">
+                <strong>Visual hook:</strong> {concept.visual_hook}
+              </p>
+            </div>
+          ))}
+        </CollapsibleInsightSection>
+      ) : null}
+
+      {promptSet.image_prompts.length > 0 ? (
+        <CollapsibleInsightSection
+          title={`Image prompts (${promptSet.image_prompts.length})`}
+        >
+          {promptSet.image_prompts.map((item, i) => (
+            <div key={i} className="insight-card insight-card-compact">
+              <div className="copy-block-head">
+                <h5 className="insight-card-title">
+                  {item.concept_name}{" "}
+                  <span className="meta-chip">{item.aspect_ratio}</span>
+                </h5>
+                <CopyButton text={formatImagePromptForCopy(item)} />
+              </div>
+              <p className="copy-block-text">{item.prompt}</p>
+              {item.overlay_text ? (
+                <p className="insight-text">
+                  <strong>Overlay:</strong> {item.overlay_text}
+                </p>
+              ) : null}
+              {item.style_notes ? (
+                <p className="insight-text">
+                  <strong>Style:</strong> {item.style_notes}
+                </p>
+              ) : null}
+            </div>
+          ))}
+        </CollapsibleInsightSection>
+      ) : null}
+
+      {promptSet.ugc_scripts.length > 0 ? (
+        <CollapsibleInsightSection
+          title={`UGC scripts (${promptSet.ugc_scripts.length})`}
+        >
+          {promptSet.ugc_scripts.map((script, i) => (
+            <div key={i} className="insight-card insight-card-compact">
+              <div className="copy-block-head">
+                <h5 className="insight-card-title">
+                  {script.script_name}{" "}
+                  <span className="meta-chip">{script.duration}</span>
+                </h5>
+                <CopyButton text={formatUgcScriptForCopy(script)} />
+              </div>
+              <p className="insight-text">
+                <strong>Hook:</strong> {script.hook}
+              </p>
+              <p className="copy-block-text">{script.script}</p>
+              {script.shot_list.length > 0 ? (
+                <ul className="bullet-list">
+                  {script.shot_list.map((shot, j) => (
+                    <li key={j}>{shot}</li>
+                  ))}
+                </ul>
+              ) : null}
+              {script.caption ? (
+                <p className="insight-text">
+                  <strong>Caption:</strong> {script.caption}
+                </p>
+              ) : null}
+            </div>
+          ))}
+        </CollapsibleInsightSection>
+      ) : null}
+
+      {promptSet.overlay_texts.length > 0 ? (
+        <CollapsibleInsightSection
+          title={`Overlay texts (${promptSet.overlay_texts.length})`}
+        >
+          <ul className="copy-list">
+            {promptSet.overlay_texts.map((item, i) => (
+              <li key={i} className="copy-list-item">
+                <span>
+                  <span className="meta-chip">{item.use_case}</span> {item.text}
+                </span>
+                <CopyButton text={item.text} label="Copy" />
+              </li>
+            ))}
+          </ul>
+        </CollapsibleInsightSection>
+      ) : null}
+
+      {promptSet.negative_prompts.length > 0 ? (
+        <CollapsibleInsightSection title="Negative prompts">
+          <ul className="bullet-list">
+            {promptSet.negative_prompts.map((item, i) => (
+              <li key={i}>{item}</li>
+            ))}
+          </ul>
+        </CollapsibleInsightSection>
+      ) : null}
+
+      {promptSet.compliance_notes.length > 0 ? (
+        <CollapsibleInsightSection
+          title={`Compliance (${promptSet.compliance_notes.length})`}
+        >
+          {promptSet.compliance_notes.map((note, i) => (
+            <div
+              key={i}
+              className="insight-card insight-card-warning insight-card-compact"
+            >
               <h5 className="insight-card-title">{note.risk}</h5>
               <p className="insight-text">
                 <strong>Safer:</strong> {note.safer_direction}

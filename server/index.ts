@@ -25,8 +25,10 @@ import {
   EXPECTED_ANGLES_PER_DESIRE,
 } from "./angles";
 import { generateAdCopy } from "./copy";
+import { generateCreativePrompts } from "./creative-prompts";
 import type {
   AdCopySet,
+  CreativePromptSet,
   CustomerAvatarOutput,
   MassDesire,
   MassDesireWithAngles,
@@ -947,6 +949,222 @@ app.post("/api/copy/generate", async (req, res) => {
   }
 
   return res.json({ copySet: insertedData as AdCopySet });
+});
+
+app.post("/api/creative-prompts/generate", async (req, res) => {
+  const body = req.body as {
+    projectId?: unknown;
+    marketingAngleId?: unknown;
+    adCopySetId?: unknown;
+  };
+  const projectId = body.projectId;
+  const marketingAngleId = body.marketingAngleId;
+  const adCopySetId = body.adCopySetId;
+
+  if (typeof projectId !== "string" || projectId.trim().length === 0) {
+    return res.status(400).json({ error: "Missing or invalid 'projectId'." });
+  }
+
+  if (
+    typeof marketingAngleId !== "string" ||
+    marketingAngleId.trim().length === 0
+  ) {
+    return res
+      .status(400)
+      .json({ error: "Missing or invalid 'marketingAngleId'." });
+  }
+
+  if (typeof adCopySetId !== "string" || adCopySetId.trim().length === 0) {
+    return res.status(400).json({ error: "Missing or invalid 'adCopySetId'." });
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    return res
+      .status(500)
+      .json({ error: "OPENAI_API_KEY is not set on the backend (.env.local)." });
+  }
+
+  let supabase: ReturnType<typeof getSupabase>;
+  try {
+    supabase = getSupabase();
+  } catch (error: unknown) {
+    return res.status(500).json({ error: errorMessage(error) });
+  }
+
+  const { data: projectData, error: projectError } = await supabase
+    .from("projects")
+    .select("*")
+    .eq("id", projectId)
+    .single();
+
+  if (projectError || !projectData) {
+    return res.status(404).json({
+      error: `Project not found: ${projectError?.message ?? projectId}`,
+    });
+  }
+
+  const project = projectData as ProductProject;
+
+  const { data: angleData, error: angleError } = await supabase
+    .from("marketing_angles")
+    .select("*")
+    .eq("id", marketingAngleId)
+    .single();
+
+  if (angleError || !angleData) {
+    return res.status(404).json({
+      error: `Marketing angle not found: ${angleError?.message ?? marketingAngleId}`,
+    });
+  }
+
+  const angle = angleData as MarketingAngle;
+
+  if (angle.project_id !== project.id) {
+    return res.status(400).json({
+      error: "Marketing angle does not belong to this project.",
+    });
+  }
+
+  const { data: desireData, error: desireError } = await supabase
+    .from("mass_desires")
+    .select("*")
+    .eq("id", angle.mass_desire_id)
+    .single();
+
+  if (desireError || !desireData) {
+    return res.status(404).json({
+      error: `Related mass desire not found: ${desireError?.message ?? angle.mass_desire_id}`,
+    });
+  }
+
+  const massDesire = desireData as MassDesire;
+
+  const { data: copySetData, error: copySetError } = await supabase
+    .from("ad_copy_sets")
+    .select("*")
+    .eq("id", adCopySetId)
+    .single();
+
+  if (copySetError || !copySetData) {
+    return res.status(404).json({
+      error: `Ad copy set not found: ${copySetError?.message ?? adCopySetId}. Generate Quick Copy first.`,
+    });
+  }
+
+  const copySet = copySetData as AdCopySet;
+
+  if (copySet.project_id !== project.id) {
+    return res.status(400).json({
+      error: "Ad copy set does not belong to this project.",
+    });
+  }
+
+  if (copySet.marketing_angle_id !== angle.id) {
+    return res.status(400).json({
+      error: "Ad copy set does not belong to this marketing angle.",
+    });
+  }
+
+  const { data: insightData, error: insightError } = await supabase
+    .from("research_insights")
+    .select("*")
+    .eq("project_id", project.id)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (insightError) {
+    return res.status(500).json({
+      error: `Failed to load insight report: ${insightError.message}`,
+    });
+  }
+
+  if (!insightData) {
+    return res.status(400).json({
+      error:
+        "No insight report found. Please run Generate Insight Report first.",
+    });
+  }
+
+  const insight = insightData as ResearchInsight;
+
+  const { data: avatarData, error: avatarError } = await supabase
+    .from("generated_outputs")
+    .select("*")
+    .eq("project_id", project.id)
+    .eq("output_type", "customer_avatar")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (avatarError) {
+    return res.status(500).json({
+      error: `Failed to load customer avatar: ${avatarError.message}`,
+    });
+  }
+
+  if (!avatarData) {
+    return res.status(400).json({
+      error:
+        "No customer avatar found. Please run Generate Customer Avatar first.",
+    });
+  }
+
+  const avatarOutput = avatarData as CustomerAvatarOutput;
+
+  let promptContent;
+  try {
+    promptContent = await generateCreativePrompts(
+      project,
+      insight,
+      avatarOutput.content_json,
+      massDesire,
+      angle,
+      copySet
+    );
+  } catch (error: unknown) {
+    const message = errorMessage(error);
+    if (error instanceof ResearchParseError) {
+      return res.status(502).json({ error: message, raw: error.rawText });
+    }
+    return res.status(502).json({ error: message });
+  }
+
+  const { error: deletePromptError } = await supabase
+    .from("creative_prompt_sets")
+    .delete()
+    .eq("ad_copy_set_id", adCopySetId);
+
+  if (deletePromptError) {
+    return res.status(500).json({
+      error: `Failed to clear old creative prompts: ${deletePromptError.message}`,
+    });
+  }
+
+  const { data: insertedData, error: insertError } = await supabase
+    .from("creative_prompt_sets")
+    .insert({
+      project_id: project.id,
+      mass_desire_id: massDesire.id,
+      marketing_angle_id: angle.id,
+      ad_copy_set_id: copySet.id,
+      creative_concepts: promptContent.creative_concepts,
+      image_prompts: promptContent.image_prompts,
+      ugc_scripts: promptContent.ugc_scripts,
+      overlay_texts: promptContent.overlay_texts,
+      negative_prompts: promptContent.negative_prompts,
+      compliance_notes: promptContent.compliance_notes,
+    })
+    .select()
+    .single();
+
+  if (insertError || !insertedData) {
+    return res.status(500).json({
+      error: `Failed to save creative prompt set: ${insertError?.message ?? "unknown error"}`,
+    });
+  }
+
+  return res.json({ promptSet: insertedData as CreativePromptSet });
 });
 
 app.listen(PORT, () => {

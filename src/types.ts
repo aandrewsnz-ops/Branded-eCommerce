@@ -352,3 +352,63 @@ export interface AdCopySet extends AdCopyContent {
 export interface GenerateCopyResponse {
   copySet: AdCopySet;
 }
+
+export interface CreativeConcept {
+  concept_name: string;
+  format: string;
+  core_idea: string;
+  why_it_matches_the_angle: string;
+  visual_hook: string;
+  recommended_use: string;
+}
+
+export interface ImagePrompt {
+  concept_name: string;
+  aspect_ratio: string;
+  prompt: string;
+  overlay_text: string;
+  style_notes: string;
+}
+
+export interface UgcScript {
+  script_name: string;
+  duration: string;
+  hook: string;
+  script: string;
+  shot_list: string[];
+  caption: string;
+}
+
+export interface CreativeOverlayText {
+  text: string;
+  use_case: string;
+}
+
+export interface CreativeComplianceNote {
+  risk: string;
+  safer_direction: string;
+}
+
+/** Creative prompt content produced by OpenAI (before DB metadata). */
+export interface CreativePromptContent {
+  creative_concepts: CreativeConcept[];
+  image_prompts: ImagePrompt[];
+  ugc_scripts: UgcScript[];
+  overlay_texts: CreativeOverlayText[];
+  negative_prompts: string[];
+  compliance_notes: CreativeComplianceNote[];
+}
+
+/** A saved row from the creative_prompt_sets table. */
+export interface CreativePromptSet extends CreativePromptContent {
+  id: string;
+  project_id: string;
+  mass_desire_id: string;
+  marketing_angle_id: string;
+  ad_copy_set_id: string;
+  created_at: string;
+}
+
+export interface GenerateCreativePromptsResponse {
+  promptSet: CreativePromptSet;
+}

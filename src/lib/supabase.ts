@@ -1,6 +1,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type {
   AdCopySet,
+  CreativePromptSet,
   CustomerAvatarOutput,
   MassDesire,
   MarketingAngle,
@@ -241,4 +242,25 @@ export async function fetchAdCopySets(
   }
 
   return (data ?? []) as AdCopySet[];
+}
+
+/** Fetch all saved creative prompt sets for a project. */
+export async function fetchCreativePromptSets(
+  projectId: string
+): Promise<CreativePromptSet[]> {
+  if (!supabase) {
+    return [];
+  }
+
+  const { data, error } = await supabase
+    .from("creative_prompt_sets")
+    .select("*")
+    .eq("project_id", projectId)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data ?? []) as CreativePromptSet[];
 }
