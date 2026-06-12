@@ -1,6 +1,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type {
   CustomerAvatarOutput,
+  MassDesiresOutput,
   ProductProject,
   ProductProjectInput,
   ResearchInsight,
@@ -175,4 +176,31 @@ export async function fetchLatestCustomerAvatar(
   }
 
   return (data as CustomerAvatarOutput) ?? null;
+}
+
+/**
+ * Fetch the most recent saved mass desires for a project, or null if none
+ * exists. Returns null in local-only mode (no Supabase client).
+ */
+export async function fetchLatestMassDesires(
+  projectId: string
+): Promise<MassDesiresOutput | null> {
+  if (!supabase) {
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from("generated_outputs")
+    .select("*")
+    .eq("project_id", projectId)
+    .eq("output_type", "mass_desires")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data as MassDesiresOutput) ?? null;
 }

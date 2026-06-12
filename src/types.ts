@@ -208,3 +208,39 @@ export interface CustomerAvatarOutput {
 export interface GenerateAvatarResponse {
   avatar: CustomerAvatarOutput;
 }
+
+export interface MassDesire {
+  desire_statement: string;
+  audience_segment: string;
+  what_they_are_really_buying: string;
+  emotional_driver: string;
+  life_context: string;
+  pain_it_moves_away_from: string;
+  positive_outcome_it_moves_toward: string;
+  why_this_desire_is_distinct: string;
+  copy_direction: string;
+  messaging_to_avoid: string;
+  compliance_notes: string[];
+}
+
+/** Structured mass desires content stored in generated_outputs.content_json. */
+export interface MassDesiresContent {
+  mass_desires: MassDesire[];
+}
+
+/** A saved generated_outputs row for mass desires. */
+export interface MassDesiresOutput {
+  id: string;
+  project_id: string;
+  run_id: string | null;
+  output_type: "mass_desires";
+  parent_type: string | null;
+  parent_id: string | null;
+  content_json: MassDesiresContent;
+  content_text: string;
+  created_at: string;
+}
+
+export interface GenerateDesiresResponse {
+  desires: MassDesiresOutput;
+}

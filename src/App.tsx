@@ -19,6 +19,7 @@ import {
 import {
   fetchLatestCustomerAvatar,
   fetchLatestInsight,
+  fetchLatestMassDesires,
   fetchLatestResearchSources,
   fetchProjects,
   insertProject,
@@ -27,7 +28,9 @@ import {
 import type {
   CustomerAvatarOutput,
   GenerateAvatarResponse,
+  GenerateDesiresResponse,
   GenerateInsightResponse,
+  MassDesiresOutput,
   ProductProject,
   ProductProjectInput,
   ResearchInsight,
@@ -167,6 +170,15 @@ function App() {
     null
   );
   const [avatarError, setAvatarError] = useState<string | null>(null);
+
+  const [desiresByProject, setDesiresByProject] = useState<
+    Record<string, MassDesiresOutput | null>
+  >({});
+  const [desiresLoadingId, setDesiresLoadingId] = useState<string | null>(null);
+  const [generatingDesiresId, setGeneratingDesiresId] = useState<string | null>(
+    null
+  );
+  const [desiresError, setDesiresError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isSupabaseConfigured) {
@@ -327,6 +339,46 @@ function App() {
     };
   }, [selectedId, avatarByProject]);
 
+  useEffect(() => {
+    if (!isSupabaseConfigured || !selectedId) {
+      return;
+    }
+    if (selectedId in desiresByProject) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const load = async () => {
+      setDesiresLoadingId(selectedId);
+      setDesiresError(null);
+      try {
+        const desires = await fetchLatestMassDesires(selectedId);
+        if (cancelled) return;
+        setDesiresByProject((prev) => ({ ...prev, [selectedId]: desires }));
+      } catch (err: unknown) {
+        if (cancelled) return;
+        setDesiresError(
+          err instanceof Error
+            ? `Failed to load mass desires: ${err.message}`
+            : "Failed to load mass desires."
+        );
+      } finally {
+        if (!cancelled) {
+          setDesiresLoadingId((current) =>
+            current === selectedId ? null : current
+          );
+        }
+      }
+    };
+
+    void load();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId, desiresByProject]);
+
   function updateField<K extends keyof ProductProjectInput>(
     key: K,
     value: ProductProjectInput[K]
@@ -381,6 +433,11 @@ function App() {
 
     if (stage.id === "customer_avatar") {
       await handleGenerateAvatar(selectedProject.id);
+      return;
+    }
+
+    if (stage.id === "mass_desires") {
+      await handleGenerateDesires(selectedProject.id);
       return;
     }
 
@@ -495,6 +552,42 @@ function App() {
       );
     } finally {
       setGeneratingAvatarId((current) =>
+        current === projectId ? null : current
+      );
+    }
+  }
+
+  async function handleGenerateDesires(projectId: string) {
+    setStatusMessage(null);
+    setDesiresError(null);
+    setGeneratingDesiresId(projectId);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/desires/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId }),
+      });
+
+      const payload: unknown = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        const message =
+          payload && typeof payload === "object" && "error" in payload
+            ? String((payload as { error: unknown }).error)
+            : `Mass desires failed (HTTP ${res.status}).`;
+        throw new Error(message);
+      }
+
+      const data = payload as GenerateDesiresResponse;
+      setDesiresByProject((prev) => ({ ...prev, [projectId]: data.desires }));
+      setStatusMessage("Mass desires generated.");
+    } catch (err: unknown) {
+      setDesiresError(
+        err instanceof Error ? err.message : "Mass desires failed."
+      );
+    } finally {
+      setGeneratingDesiresId((current) =>
         current === projectId ? null : current
       );
     }
@@ -705,6 +798,10 @@ function App() {
               isAvatarLoading={avatarLoadingId === selectedProject.id}
               avatarError={avatarError}
               avatar={avatarByProject[selectedProject.id] ?? null}
+              isGeneratingDesires={generatingDesiresId === selectedProject.id}
+              isDesiresLoading={desiresLoadingId === selectedProject.id}
+              desiresError={desiresError}
+              desires={desiresByProject[selectedProject.id] ?? null}
             />
           ) : (
             <div className="empty-state">
@@ -787,6 +884,10 @@ interface ProjectDetailProps {
   isAvatarLoading: boolean;
   avatarError: string | null;
   avatar: CustomerAvatarOutput | null;
+  isGeneratingDesires: boolean;
+  isDesiresLoading: boolean;
+  desiresError: string | null;
+  desires: MassDesiresOutput | null;
 }
 
 function ProjectDetail({
@@ -805,6 +906,10 @@ function ProjectDetail({
   isAvatarLoading,
   avatarError,
   avatar,
+  isGeneratingDesires,
+  isDesiresLoading,
+  desiresError,
+  desires,
 }: ProjectDetailProps) {
   return (
     <div className="detail">
@@ -855,13 +960,15 @@ function ProjectDetail({
             const busy =
               (stage.id === "research" && isResearching) ||
               (stage.id === "insight_report" && isGeneratingInsight) ||
-              (stage.id === "customer_avatar" && isGeneratingAvatar);
-            const busyLabel =
-              stage.id === "research"
-                ? "Running research…"
-                : stage.id === "insight_report"
-                  ? "Generating insight report…"
-                  : "Generating customer avatar…";
+              (stage.id === "customer_avatar" && isGeneratingAvatar) ||
+              (stage.id === "mass_desires" && isGeneratingDesires);
+            const busyLabels: Partial<Record<WorkflowStage["id"], string>> = {
+              research: "Running research…",
+              insight_report: "Generating insight report…",
+              customer_avatar: "Generating customer avatar…",
+              mass_desires: "Generating mass desires…",
+            };
+            const busyLabel = busyLabels[stage.id];
             return (
               <button
                 key={stage.id}
@@ -877,7 +984,7 @@ function ProjectDetail({
                   <Icon size={16} strokeWidth={2} />
                 )}
                 <span className="stage-label">
-                  {busy ? busyLabel : stage.label}
+                  {busy && busyLabel ? busyLabel : stage.label}
                 </span>
               </button>
             );
@@ -904,6 +1011,13 @@ function ProjectDetail({
         isLoading={isAvatarLoading}
         error={avatarError}
         avatar={avatar}
+      />
+
+      <MassDesiresPanel
+        isGenerating={isGeneratingDesires}
+        isLoading={isDesiresLoading}
+        error={desiresError}
+        desires={desires}
       />
     </div>
   );
@@ -1445,6 +1559,111 @@ function CustomerAvatarPanel({
               ))}
             </ul>
           </InsightSection>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+interface MassDesiresPanelProps {
+  isGenerating: boolean;
+  isLoading: boolean;
+  error: string | null;
+  desires: MassDesiresOutput | null;
+}
+
+function MassDesiresPanel({
+  isGenerating,
+  isLoading,
+  error,
+  desires,
+}: MassDesiresPanelProps) {
+  const hasContent = isGenerating || isLoading || error || desires;
+  if (!hasContent) {
+    return null;
+  }
+
+  const items = desires?.content_json.mass_desires ?? [];
+
+  return (
+    <div className="insight desires-panel">
+      <div className="research-head">
+        <h3 className="workflow-title">Mass desires</h3>
+        {desires ? (
+          <span className="insight-date">
+            {new Date(desires.created_at).toLocaleString()}
+          </span>
+        ) : null}
+        {items.length > 0 ? (
+          <span className="count-badge">{items.length}</span>
+        ) : null}
+      </div>
+
+      {error ? (
+        <div className="banner banner-error" role="alert">
+          <AlertTriangle size={16} />
+          <span>{error}</span>
+        </div>
+      ) : null}
+
+      {isGenerating ? (
+        <div className="list-state">
+          <Loader2 size={16} strokeWidth={2} className="spin" />
+          <span>Generating mass desires… this can take a minute.</span>
+        </div>
+      ) : isLoading ? (
+        <div className="list-state">
+          <Loader2 size={16} strokeWidth={2} className="spin" />
+          <span>Loading mass desires…</span>
+        </div>
+      ) : null}
+
+      {!isGenerating && items.length > 0 ? (
+        <div className="source-list">
+          {items.map((desire, index) => (
+            <article key={index} className="source-card desire-card">
+              <header className="source-card-head">
+                <h4 className="source-title">{desire.desire_statement}</h4>
+                <span className="stage-index">{index + 1}</span>
+              </header>
+
+              {desire.audience_segment ? (
+                <span className="meta-chip meta-chip-theme">
+                  {desire.audience_segment}
+                </span>
+              ) : null}
+
+              <p className="insight-text">
+                <strong>Emotional driver:</strong> {desire.emotional_driver}
+              </p>
+              <p className="insight-text">
+                <strong>What they are really buying:</strong>{" "}
+                {desire.what_they_are_really_buying}
+              </p>
+              <p className="insight-text">
+                <strong>Pain it moves away from:</strong>{" "}
+                {desire.pain_it_moves_away_from}
+              </p>
+              <p className="insight-text">
+                <strong>Positive outcome it moves toward:</strong>{" "}
+                {desire.positive_outcome_it_moves_toward}
+              </p>
+              <p className="insight-text">
+                <strong>Copy direction:</strong> {desire.copy_direction}
+              </p>
+              <p className="insight-text">
+                <strong>Messaging to avoid:</strong> {desire.messaging_to_avoid}
+              </p>
+
+              {desire.compliance_notes.length > 0 ? (
+                <ul className="bullet-list">
+                  {desire.compliance_notes.map((note, i) => (
+                    <li key={i}>{note}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </article>
+          ))}
         </div>
       ) : null}
     </div>

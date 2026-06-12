@@ -641,6 +641,15 @@ p {
   font-size: 16px;
 }
 
+.desires-panel .research-head {
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.desire-card .source-title {
+  font-style: italic;
+}
+
 .insight-date {
   font-size: 12px;
   color: var(--text-faint);

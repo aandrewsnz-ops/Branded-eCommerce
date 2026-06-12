@@ -16,8 +16,10 @@ import {
   generateCustomerAvatar,
   avatarToContentText,
 } from "./avatar";
+import { generateMassDesires, desiresToContentText } from "./desires";
 import type {
   CustomerAvatarOutput,
+  MassDesiresOutput,
   ProductProject,
   ResearchInsight,
   ResearchRun,
@@ -403,6 +405,127 @@ app.post("/api/avatar/generate", async (req, res) => {
   const avatar = insertedData as CustomerAvatarOutput;
 
   return res.json({ avatar });
+});
+
+app.post("/api/desires/generate", async (req, res) => {
+  const projectId = (req.body as { projectId?: unknown })?.projectId;
+
+  if (typeof projectId !== "string" || projectId.trim().length === 0) {
+    return res.status(400).json({ error: "Missing or invalid 'projectId'." });
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    return res
+      .status(500)
+      .json({ error: "OPENAI_API_KEY is not set on the backend (.env.local)." });
+  }
+
+  let supabase: ReturnType<typeof getSupabase>;
+  try {
+    supabase = getSupabase();
+  } catch (error: unknown) {
+    return res.status(500).json({ error: errorMessage(error) });
+  }
+
+  const { data: projectData, error: projectError } = await supabase
+    .from("projects")
+    .select("*")
+    .eq("id", projectId)
+    .single();
+
+  if (projectError || !projectData) {
+    return res.status(404).json({
+      error: `Project not found: ${projectError?.message ?? projectId}`,
+    });
+  }
+
+  const project = projectData as ProductProject;
+
+  const { data: insightData, error: insightError } = await supabase
+    .from("research_insights")
+    .select("*")
+    .eq("project_id", project.id)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (insightError) {
+    return res.status(500).json({
+      error: `Failed to load insight report: ${insightError.message}`,
+    });
+  }
+
+  if (!insightData) {
+    return res.status(400).json({
+      error:
+        "No insight report found. Please run Generate Insight Report first.",
+    });
+  }
+
+  const insight = insightData as ResearchInsight;
+
+  const { data: avatarData, error: avatarError } = await supabase
+    .from("generated_outputs")
+    .select("*")
+    .eq("project_id", project.id)
+    .eq("output_type", "customer_avatar")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (avatarError) {
+    return res.status(500).json({
+      error: `Failed to load customer avatar: ${avatarError.message}`,
+    });
+  }
+
+  if (!avatarData) {
+    return res.status(400).json({
+      error:
+        "No customer avatar found. Please run Generate Customer Avatar first.",
+    });
+  }
+
+  const avatarOutput = avatarData as CustomerAvatarOutput;
+
+  let desiresContent;
+  try {
+    desiresContent = await generateMassDesires(
+      project,
+      insight,
+      avatarOutput.content_json
+    );
+  } catch (error: unknown) {
+    const message = errorMessage(error);
+    if (error instanceof ResearchParseError) {
+      return res.status(502).json({ error: message, raw: error.rawText });
+    }
+    return res.status(502).json({ error: message });
+  }
+
+  const { data: insertedData, error: insertError } = await supabase
+    .from("generated_outputs")
+    .insert({
+      project_id: project.id,
+      run_id: insight.run_id ?? null,
+      output_type: "mass_desires",
+      parent_type: "customer_avatar",
+      parent_id: avatarOutput.id,
+      content_json: desiresContent,
+      content_text: desiresToContentText(desiresContent),
+    })
+    .select()
+    .single();
+
+  if (insertError || !insertedData) {
+    return res.status(500).json({
+      error: `Failed to save mass desires: ${insertError?.message ?? "unknown error"}`,
+    });
+  }
+
+  const desires = insertedData as MassDesiresOutput;
+
+  return res.json({ desires });
 });
 
 app.listen(PORT, () => {
