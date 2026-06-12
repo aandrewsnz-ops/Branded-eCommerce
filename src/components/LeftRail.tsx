@@ -6,6 +6,7 @@ import {
   Loader2,
   Plus,
   Tag,
+  Trash2,
   X,
 } from "lucide-react";
 import type { ProductProject, ProductProjectInput } from "../types";
@@ -18,6 +19,8 @@ interface LeftRailProps {
   selectedProject: ProductProject | null;
   isLoading: boolean;
   onSelectProject: (id: string) => void;
+  deletingProjectId: string | null;
+  onDeleteProject: (id: string) => void;
 
   mode: WorkflowMode;
   statuses: Record<WorkflowMode, ModeStatus>;
@@ -82,6 +85,8 @@ export function LeftRail({
   selectedProject,
   isLoading,
   onSelectProject,
+  deletingProjectId,
+  onDeleteProject,
   mode,
   statuses,
   onChangeMode,
@@ -177,33 +182,53 @@ export function LeftRail({
           <div className="list-state">No projects yet.</div>
         ) : (
           <ul className="rail-project-list">
-            {projects.map((project) => (
-              <li key={project.id}>
-                <button
-                  type="button"
-                  className={`rail-project-item${project.id === selectedId ? " is-active" : ""}`}
-                  onClick={() => onSelectProject(project.id)}
-                >
-                  <span className="rail-project-name">
-                    {project.our_product_name || "Untitled project"}
-                  </span>
-                  <span className="rail-project-meta">
-                    {project.target_country ? (
-                      <span className="meta-chip">
-                        <Globe size={11} />
-                        {project.target_country}
-                      </span>
-                    ) : null}
-                    {project.planned_sale_price ? (
-                      <span className="meta-chip">
-                        <Tag size={11} />
-                        {project.planned_sale_price}
-                      </span>
-                    ) : null}
-                  </span>
-                </button>
-              </li>
-            ))}
+            {projects.map((project) => {
+              const isDeleting = deletingProjectId === project.id;
+              return (
+                <li key={project.id} className="rail-project-li">
+                  <button
+                    type="button"
+                    className={`rail-project-item${project.id === selectedId ? " is-active" : ""}`}
+                    onClick={() => onSelectProject(project.id)}
+                  >
+                    <span className="rail-project-name">
+                      {project.our_product_name || "Untitled project"}
+                    </span>
+                    <span className="rail-project-meta">
+                      {project.target_country ? (
+                        <span className="meta-chip">
+                          <Globe size={11} />
+                          {project.target_country}
+                        </span>
+                      ) : null}
+                      {project.planned_sale_price ? (
+                        <span className="meta-chip">
+                          <Tag size={11} />
+                          {project.planned_sale_price}
+                        </span>
+                      ) : null}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="rail-project-delete"
+                    title="Delete project"
+                    aria-label="Delete project"
+                    disabled={isDeleting}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onDeleteProject(project.id);
+                    }}
+                  >
+                    {isDeleting ? (
+                      <Loader2 size={13} strokeWidth={2.5} className="spin" />
+                    ) : (
+                      <Trash2 size={13} strokeWidth={2.5} />
+                    )}
+                  </button>
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>

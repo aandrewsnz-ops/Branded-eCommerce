@@ -24,13 +24,17 @@ import {
   generateMarketingAngles,
   EXPECTED_ANGLES_PER_DESIRE,
 } from "./angles";
-import { generateAdCopy } from "./copy";
+import { generateAdCopy, regenerateAd, regenerateImagePrompt } from "./copy";
 import { generateCreativePrompts } from "./creative-prompts";
+import { generateTofConcepts } from "./tof-concepts";
 import { normalizeProject } from "../src/types";
 import type {
   AdCopySet,
+  AdVariation,
   CreativePromptSet,
   CustomerAvatarOutput,
+  DesireConcept,
+  DesireConceptSet,
   MassDesire,
   MassDesireWithAngles,
   MarketingAngle,
@@ -770,6 +774,7 @@ const VALID_REVIEW_STATUSES = new Set([
   "untested",
   "shortlisted",
   "rejected",
+  "published",
   "needs_copy",
   "ready_for_creative",
   "ready_to_publish",
@@ -805,7 +810,7 @@ app.patch("/api/angles/:angleId/review", async (req, res) => {
     ) {
       return res.status(400).json({
         error:
-          "Invalid 'review_status'. Must be one of: untested, shortlisted, rejected, needs_copy, ready_for_creative, ready_to_publish.",
+          "Invalid 'review_status'. Must be one of: untested, shortlisted, rejected, published, needs_copy, ready_for_creative, ready_to_publish.",
       });
     }
     updates.review_status = body.review_status;
@@ -1048,6 +1053,8 @@ app.post("/api/copy/generate", async (req, res) => {
       hook_transitions: copyContent.hook_transitions,
       callouts: copyContent.callouts,
       compliance_notes: copyContent.compliance_notes,
+      ad_variations: copyContent.ad_variations ?? [],
+      image_prompts: copyContent.image_prompts ?? [],
     })
     .select()
     .single();
@@ -1059,6 +1066,435 @@ app.post("/api/copy/generate", async (req, res) => {
   }
 
   return res.json({ copySet: insertedData as AdCopySet });
+});
+
+const AD_VARIATION_FIELDS = [
+  "primary",
+  "headline",
+  "description",
+  "visual_strategy",
+  "image_prompt",
+] as const;
+
+app.patch("/api/copy/:copySetId", async (req, res) => {
+  const copySetId = req.params.copySetId;
+
+  if (typeof copySetId !== "string" || copySetId.trim().length === 0) {
+    return res.status(400).json({ error: "Missing or invalid copy set id." });
+  }
+
+  const body = req.body as { ad_variations?: unknown };
+  const rawVariations = body.ad_variations;
+
+  if (!Array.isArray(rawVariations)) {
+    return res
+      .status(400)
+      .json({ error: "'ad_variations' must be an array." });
+  }
+
+  if (rawVariations.length !== 5) {
+    return res.status(400).json({
+      error: `'ad_variations' must contain exactly 5 items (got ${rawVariations.length}).`,
+    });
+  }
+
+  const adVariations: AdVariation[] = [];
+  for (let i = 0; i < rawVariations.length; i += 1) {
+    const item = rawVariations[i];
+    if (!item || typeof item !== "object") {
+      return res
+        .status(400)
+        .json({ error: `Ad ${i + 1} must be an object.` });
+    }
+    const record = item as Record<string, unknown>;
+    const cleaned = {} as AdVariation;
+    for (const field of AD_VARIATION_FIELDS) {
+      const value = record[field];
+      if (typeof value !== "string") {
+        return res.status(400).json({
+          error: `Ad ${i + 1} is missing a valid '${field}'.`,
+        });
+      }
+      cleaned[field] = value;
+    }
+    // Preserve per-ad metadata (lock / revision tracking) when present.
+    if (typeof record.locked === "boolean") cleaned.locked = record.locked;
+    if (typeof record.last_regenerated_at === "string") {
+      cleaned.last_regenerated_at = record.last_regenerated_at;
+    }
+    if (typeof record.revision_count === "number") {
+      cleaned.revision_count = record.revision_count;
+    }
+    if (typeof record.is_winner === "boolean") {
+      cleaned.is_winner = record.is_winner;
+    }
+    for (const field of [
+      "image_url",
+      "image_path",
+      "image_filename",
+      "image_uploaded_at",
+      "image_file_type",
+    ] as const) {
+      if (typeof record[field] === "string") {
+        cleaned[field] = record[field];
+      }
+    }
+    adVariations.push(cleaned);
+  }
+
+  let supabase: ReturnType<typeof getSupabase>;
+  try {
+    supabase = getSupabase();
+  } catch (error: unknown) {
+    return res.status(500).json({ error: errorMessage(error) });
+  }
+
+  const { data: existing, error: existingError } = await supabase
+    .from("ad_copy_sets")
+    .select("id")
+    .eq("id", copySetId)
+    .maybeSingle();
+
+  if (existingError) {
+    return res.status(500).json({
+      error: `Failed to load ad copy set: ${existingError.message}`,
+    });
+  }
+
+  if (!existing) {
+    return res
+      .status(404)
+      .json({ error: `Ad copy set not found: ${copySetId}` });
+  }
+
+  const { data: updated, error: updateError } = await supabase
+    .from("ad_copy_sets")
+    .update(buildCopySetUpdate(adVariations))
+    .eq("id", copySetId)
+    .select()
+    .single();
+
+  if (updateError || !updated) {
+    return res.status(500).json({
+      error: `Failed to update ad copy set: ${updateError?.message ?? "unknown error"}`,
+    });
+  }
+
+  return res.json({ copySet: updated as AdCopySet });
+});
+
+/** Build the ad_copy_sets update payload, refreshing compatibility fields. */
+function buildCopySetUpdate(adVariations: AdVariation[]) {
+  return {
+    ad_variations: adVariations,
+    image_prompts: adVariations.map((ad) => ad.image_prompt),
+    short_primary_texts: adVariations.map((ad, i) => ({
+      label: `Ad ${i + 1}`,
+      text: ad.primary,
+      strategy: "",
+    })),
+    headlines: adVariations.map((ad) => ({ text: ad.headline, angle: "" })),
+    descriptions: adVariations.map((ad) => ({
+      text: ad.description,
+      angle: "",
+    })),
+    is_edited: true,
+    updated_at: new Date().toISOString(),
+  };
+}
+
+/** Read up to 5 ad variations from a copy set row, padding/reconstructing. */
+function readStoredAdVariations(copySet: AdCopySet): AdVariation[] {
+  const raw = Array.isArray(copySet.ad_variations) ? copySet.ad_variations : [];
+  let ads: AdVariation[] = raw.map((ad) => {
+    const r = (ad ?? {}) as Record<string, unknown>;
+    return {
+      primary: typeof r.primary === "string" ? r.primary : "",
+      headline: typeof r.headline === "string" ? r.headline : "",
+      description: typeof r.description === "string" ? r.description : "",
+      visual_strategy:
+        typeof r.visual_strategy === "string" ? r.visual_strategy : "",
+      image_prompt: typeof r.image_prompt === "string" ? r.image_prompt : "",
+      locked: typeof r.locked === "boolean" ? r.locked : false,
+      last_regenerated_at:
+        typeof r.last_regenerated_at === "string"
+          ? r.last_regenerated_at
+          : undefined,
+      revision_count:
+        typeof r.revision_count === "number" ? r.revision_count : 0,
+      is_winner: typeof r.is_winner === "boolean" ? r.is_winner : false,
+      ...(typeof r.image_url === "string" && r.image_url.trim()
+        ? { image_url: r.image_url }
+        : {}),
+      ...(typeof r.image_path === "string" && r.image_path.trim()
+        ? { image_path: r.image_path }
+        : {}),
+      ...(typeof r.image_filename === "string" && r.image_filename.trim()
+        ? { image_filename: r.image_filename }
+        : {}),
+      ...(typeof r.image_uploaded_at === "string" && r.image_uploaded_at.trim()
+        ? { image_uploaded_at: r.image_uploaded_at }
+        : {}),
+      ...(typeof r.image_file_type === "string" && r.image_file_type.trim()
+        ? { image_file_type: r.image_file_type }
+        : {}),
+    };
+  });
+
+  // Reconstruct from legacy fields if ad_variations is empty (old copy packs).
+  if (ads.length === 0) {
+    const primaries = copySet.short_primary_texts ?? [];
+    const headlines = copySet.headlines ?? [];
+    const descriptions = copySet.descriptions ?? [];
+    const prompts = copySet.image_prompts ?? [];
+    const count = Math.max(
+      primaries.length,
+      headlines.length,
+      descriptions.length,
+      prompts.length
+    );
+    ads = Array.from({ length: count }, (_, i) => ({
+      primary: primaries[i]?.text ?? "",
+      headline: headlines[i]?.text ?? "",
+      description: descriptions[i]?.text ?? "",
+      visual_strategy: "",
+      image_prompt: prompts[i] ?? "",
+      locked: false,
+      revision_count: 0,
+      is_winner: false,
+    }));
+  }
+
+  return ads.slice(0, 5);
+}
+
+app.post("/api/copy/:copySetId/regenerate", async (req, res) => {
+  const copySetId = req.params.copySetId;
+  const body = req.body as { ad_index?: unknown; mode?: unknown };
+
+  if (typeof copySetId !== "string" || copySetId.trim().length === 0) {
+    return res.status(400).json({ error: "Missing or invalid copy set id." });
+  }
+
+  const adIndex = body.ad_index;
+  if (
+    typeof adIndex !== "number" ||
+    !Number.isInteger(adIndex) ||
+    adIndex < 0 ||
+    adIndex > 4
+  ) {
+    return res
+      .status(400)
+      .json({ error: "'ad_index' must be an integer from 0 to 4." });
+  }
+
+  const mode = body.mode;
+  if (mode !== "full_ad" && mode !== "image_prompt_only") {
+    return res.status(400).json({
+      error: "'mode' must be 'full_ad' or 'image_prompt_only'.",
+    });
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    return res
+      .status(500)
+      .json({ error: "OPENAI_API_KEY is not set on the backend (.env.local)." });
+  }
+
+  let supabase: ReturnType<typeof getSupabase>;
+  try {
+    supabase = getSupabase();
+  } catch (error: unknown) {
+    return res.status(500).json({ error: errorMessage(error) });
+  }
+
+  const { data: copyData, error: copyError } = await supabase
+    .from("ad_copy_sets")
+    .select("*")
+    .eq("id", copySetId)
+    .maybeSingle();
+
+  if (copyError) {
+    return res
+      .status(500)
+      .json({ error: `Failed to load ad copy set: ${copyError.message}` });
+  }
+  if (!copyData) {
+    return res
+      .status(404)
+      .json({ error: `Ad copy set not found: ${copySetId}` });
+  }
+
+  const copySet = copyData as AdCopySet;
+  const ads = readStoredAdVariations(copySet);
+
+  if (adIndex >= ads.length) {
+    return res
+      .status(400)
+      .json({ error: `This copy pack has no ad at index ${adIndex}.` });
+  }
+
+  if (ads[adIndex].locked) {
+    return res.status(409).json({
+      error: "This ad is locked. Unlock it before regenerating.",
+    });
+  }
+
+  const { data: projectData, error: projectError } = await supabase
+    .from("projects")
+    .select("*")
+    .eq("id", copySet.project_id)
+    .single();
+
+  if (projectError || !projectData) {
+    return res.status(404).json({
+      error: `Project not found: ${projectError?.message ?? copySet.project_id}`,
+    });
+  }
+
+  const project = normalizeProject(projectData as ProductProject);
+
+  const { data: angleData, error: angleError } = await supabase
+    .from("marketing_angles")
+    .select("*")
+    .eq("id", copySet.marketing_angle_id)
+    .single();
+
+  if (angleError || !angleData) {
+    return res.status(404).json({
+      error: `Marketing angle not found: ${angleError?.message ?? copySet.marketing_angle_id}`,
+    });
+  }
+
+  const angle = angleData as MarketingAngle;
+
+  const { data: desireData, error: desireError } = await supabase
+    .from("mass_desires")
+    .select("*")
+    .eq("id", copySet.mass_desire_id)
+    .single();
+
+  if (desireError || !desireData) {
+    return res.status(404).json({
+      error: `Related mass desire not found: ${desireError?.message ?? copySet.mass_desire_id}`,
+    });
+  }
+
+  const massDesire = desireData as MassDesire;
+
+  const { data: insightData, error: insightError } = await supabase
+    .from("research_insights")
+    .select("*")
+    .eq("project_id", project.id)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (insightError) {
+    return res.status(500).json({
+      error: `Failed to load insight report: ${insightError.message}`,
+    });
+  }
+  if (!insightData) {
+    return res.status(400).json({
+      error: "No insight report found for this project.",
+    });
+  }
+  const insight = insightData as ResearchInsight;
+
+  const { data: avatarData, error: avatarError } = await supabase
+    .from("generated_outputs")
+    .select("*")
+    .eq("project_id", project.id)
+    .eq("output_type", "customer_avatar")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (avatarError) {
+    return res.status(500).json({
+      error: `Failed to load customer avatar: ${avatarError.message}`,
+    });
+  }
+  if (!avatarData) {
+    return res.status(400).json({
+      error: "No customer avatar found for this project.",
+    });
+  }
+  const avatarOutput = avatarData as CustomerAvatarOutput;
+
+  const existing = ads[adIndex];
+  let nextAd: AdVariation;
+  try {
+    if (mode === "full_ad") {
+      const regenerated = await regenerateAd(
+        project,
+        insight,
+        avatarOutput.content_json,
+        massDesire,
+        angle,
+        ads,
+        adIndex
+      );
+      nextAd = {
+        ...regenerated,
+        locked: existing.locked ?? false,
+        is_winner: existing.is_winner ?? false,
+        ...(existing.image_url ? { image_url: existing.image_url } : {}),
+        ...(existing.image_path ? { image_path: existing.image_path } : {}),
+        ...(existing.image_filename
+          ? { image_filename: existing.image_filename }
+          : {}),
+        ...(existing.image_uploaded_at
+          ? { image_uploaded_at: existing.image_uploaded_at }
+          : {}),
+        ...(existing.image_file_type
+          ? { image_file_type: existing.image_file_type }
+          : {}),
+        revision_count: (existing.revision_count ?? 0) + 1,
+        last_regenerated_at: new Date().toISOString(),
+      };
+    } else {
+      const regenerated = await regenerateImagePrompt(
+        project,
+        insight,
+        avatarOutput.content_json,
+        massDesire,
+        angle,
+        existing
+      );
+      nextAd = {
+        ...existing,
+        visual_strategy: regenerated.visual_strategy,
+        image_prompt: regenerated.image_prompt,
+        revision_count: (existing.revision_count ?? 0) + 1,
+        last_regenerated_at: new Date().toISOString(),
+      };
+    }
+  } catch (error: unknown) {
+    const message = errorMessage(error);
+    if (error instanceof ResearchParseError) {
+      return res.status(502).json({ error: message, raw: error.rawText });
+    }
+    return res.status(502).json({ error: message });
+  }
+
+  const nextAds = ads.map((ad, i) => (i === adIndex ? nextAd : ad));
+
+  const { data: updated, error: updateError } = await supabase
+    .from("ad_copy_sets")
+    .update(buildCopySetUpdate(nextAds))
+    .eq("id", copySetId)
+    .select()
+    .single();
+
+  if (updateError || !updated) {
+    return res.status(500).json({
+      error: `Failed to save regenerated ad: ${updateError?.message ?? "unknown error"}`,
+    });
+  }
+
+  return res.json({ copySet: updated as AdCopySet });
 });
 
 app.post("/api/creative-prompts/generate", async (req, res) => {
@@ -1275,6 +1711,618 @@ app.post("/api/creative-prompts/generate", async (req, res) => {
   }
 
   return res.json({ promptSet: insertedData as CreativePromptSet });
+});
+
+/* ==================================================================== */
+/* Top-of-funnel desire concepts (mass desire level)                    */
+/* ==================================================================== */
+
+app.post("/api/tof-concepts/generate", async (req, res) => {
+  const body = req.body as {
+    projectId?: unknown;
+    massDesireId?: unknown;
+  };
+  const projectId = body.projectId;
+  const massDesireId = body.massDesireId;
+
+  if (typeof projectId !== "string" || projectId.trim().length === 0) {
+    return res.status(400).json({ error: "Missing or invalid 'projectId'." });
+  }
+
+  if (typeof massDesireId !== "string" || massDesireId.trim().length === 0) {
+    return res.status(400).json({ error: "Missing or invalid 'massDesireId'." });
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    return res
+      .status(500)
+      .json({ error: "OPENAI_API_KEY is not set on the backend (.env.local)." });
+  }
+
+  let supabase: ReturnType<typeof getSupabase>;
+  try {
+    supabase = getSupabase();
+  } catch (error: unknown) {
+    return res.status(500).json({ error: errorMessage(error) });
+  }
+
+  const { data: projectData, error: projectError } = await supabase
+    .from("projects")
+    .select("*")
+    .eq("id", projectId)
+    .single();
+
+  if (projectError || !projectData) {
+    return res.status(404).json({
+      error: `Project not found: ${projectError?.message ?? projectId}`,
+    });
+  }
+
+  const project = normalizeProject(projectData as ProductProject);
+
+  const { data: desireData, error: desireError } = await supabase
+    .from("mass_desires")
+    .select("*")
+    .eq("id", massDesireId)
+    .single();
+
+  if (desireError || !desireData) {
+    return res.status(404).json({
+      error: `Mass desire not found: ${desireError?.message ?? massDesireId}`,
+    });
+  }
+
+  const massDesire = desireData as MassDesire;
+
+  if (massDesire.project_id !== project.id) {
+    return res.status(400).json({
+      error: "Mass desire does not belong to this project.",
+    });
+  }
+
+  const { data: insightData, error: insightError } = await supabase
+    .from("research_insights")
+    .select("*")
+    .eq("project_id", project.id)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (insightError) {
+    return res.status(500).json({
+      error: `Failed to load insight report: ${insightError.message}`,
+    });
+  }
+
+  if (!insightData) {
+    return res.status(400).json({
+      error:
+        "No insight report found. Please run Generate Insight Report first.",
+    });
+  }
+
+  const insight = insightData as ResearchInsight;
+
+  const { data: avatarData, error: avatarError } = await supabase
+    .from("generated_outputs")
+    .select("*")
+    .eq("project_id", project.id)
+    .eq("output_type", "customer_avatar")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (avatarError) {
+    return res.status(500).json({
+      error: `Failed to load customer avatar: ${avatarError.message}`,
+    });
+  }
+
+  if (!avatarData) {
+    return res.status(400).json({
+      error:
+        "No customer avatar found. Please run Generate Customer Avatar first.",
+    });
+  }
+
+  const avatarOutput = avatarData as CustomerAvatarOutput;
+
+  let generated;
+  try {
+    generated = await generateTofConcepts(
+      project,
+      insight,
+      avatarOutput.content_json,
+      massDesire
+    );
+  } catch (error: unknown) {
+    const message = errorMessage(error);
+    if (error instanceof ResearchParseError) {
+      return res.status(502).json({ error: message, raw: error.rawText });
+    }
+    return res.status(502).json({ error: message });
+  }
+
+  const now = new Date().toISOString();
+
+  const { error: deleteSetError } = await supabase
+    .from("desire_concept_sets")
+    .delete()
+    .eq("mass_desire_id", massDesireId);
+
+  if (deleteSetError) {
+    const msg = deleteSetError.message.toLowerCase();
+    const tableMissing =
+      deleteSetError.code === "42P01" ||
+      msg.includes("does not exist") ||
+      msg.includes("could not find the table");
+    if (!tableMissing) {
+      return res.status(500).json({
+        error: `Failed to clear old TOF concepts: ${deleteSetError.message}`,
+      });
+    }
+  }
+
+  const { data: insertedSet, error: insertSetError } = await supabase
+    .from("desire_concept_sets")
+    .insert({
+      project_id: project.id,
+      mass_desire_id: massDesire.id,
+      source_desire_title: massDesire.desire_statement,
+      source_desire_summary: generated.sourceSummary,
+      status: "generated",
+      updated_at: now,
+    })
+    .select()
+    .single();
+
+  if (insertSetError || !insertedSet) {
+    const msg = insertSetError?.message ?? "unknown error";
+    if (/does not exist|could not find the table/i.test(msg)) {
+      return res.status(500).json({
+        error:
+          "desire_concept_sets table not found. Run supabase/desire_concept_sets.sql in Supabase first.",
+      });
+    }
+    return res.status(500).json({
+      error: `Failed to save TOF concept set: ${msg}`,
+    });
+  }
+
+  const conceptRows = generated.concepts.map((concept, index) => ({
+    concept_set_id: insertedSet.id,
+    project_id: project.id,
+    mass_desire_id: massDesire.id,
+    concept_number: index + 1,
+    concept_title: concept.concept_title,
+    headline: concept.headline,
+    support_line: concept.support_line,
+    overlay_recommendation: concept.overlay_recommendation,
+    visual_strategy: concept.visual_strategy,
+    rationale: concept.rationale,
+    image_prompt: concept.image_prompt,
+    updated_at: now,
+  }));
+
+  const { data: insertedConcepts, error: insertConceptsError } = await supabase
+    .from("desire_concepts")
+    .insert(conceptRows)
+    .select();
+
+  if (insertConceptsError || !insertedConcepts) {
+    return res.status(500).json({
+      error: `Failed to save TOF concepts: ${insertConceptsError?.message ?? "unknown error"}`,
+    });
+  }
+
+  const conceptSet: DesireConceptSet = {
+    ...(insertedSet as Omit<DesireConceptSet, "concepts">),
+    concepts: (insertedConcepts as DesireConcept[]).sort(
+      (a, b) => a.concept_number - b.concept_number
+    ),
+  };
+
+  return res.json({ conceptSet });
+});
+
+/* ==================================================================== */
+/* Ad candidates (selected, publishable ad units)                       */
+/* ==================================================================== */
+
+const VALID_AD_CANDIDATE_STATUSES = new Set(["draft", "ready", "needs_revision"]);
+
+/** Pull only the allowed, validated candidate fields out of a request body. */
+function extractAdCandidateFields(
+  body: Record<string, unknown>
+): { fields: Record<string, unknown>; error?: string } {
+  const fields: Record<string, unknown> = {};
+
+  const stringFields = [
+    "ad_title",
+    "selected_primary_text",
+    "selected_headline",
+    "selected_description",
+    "selected_hook",
+    "notes",
+  ] as const;
+
+  for (const key of stringFields) {
+    if (body[key] !== undefined) {
+      if (typeof body[key] !== "string") {
+        return { fields, error: `Invalid '${key}'. Must be a string.` };
+      }
+      fields[key] = body[key];
+    }
+  }
+
+  if (body.selected_callouts !== undefined) {
+    if (
+      !Array.isArray(body.selected_callouts) ||
+      body.selected_callouts.some((c) => typeof c !== "string")
+    ) {
+      return {
+        fields,
+        error: "Invalid 'selected_callouts'. Must be an array of strings.",
+      };
+    }
+    fields.selected_callouts = body.selected_callouts;
+  }
+
+  if (body.selected_image_prompts !== undefined) {
+    if (!Array.isArray(body.selected_image_prompts)) {
+      return {
+        fields,
+        error: "Invalid 'selected_image_prompts'. Must be an array.",
+      };
+    }
+    fields.selected_image_prompts = body.selected_image_prompts;
+  }
+
+  if (body.status !== undefined) {
+    if (
+      typeof body.status !== "string" ||
+      !VALID_AD_CANDIDATE_STATUSES.has(body.status)
+    ) {
+      return {
+        fields,
+        error: "Invalid 'status'. Must be draft, ready, or needs_revision.",
+      };
+    }
+    fields.status = body.status;
+  }
+
+  return { fields };
+}
+
+// Create or update the single active ad candidate for a marketing angle.
+app.post("/api/ad-candidates/upsert", async (req, res) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const projectId = body.projectId;
+  const marketingAngleId = body.marketingAngleId;
+
+  if (typeof projectId !== "string" || projectId.trim().length === 0) {
+    return res.status(400).json({ error: "Missing or invalid 'projectId'." });
+  }
+  if (
+    typeof marketingAngleId !== "string" ||
+    marketingAngleId.trim().length === 0
+  ) {
+    return res
+      .status(400)
+      .json({ error: "Missing or invalid 'marketingAngleId'." });
+  }
+
+  let supabase: ReturnType<typeof getSupabase>;
+  try {
+    supabase = getSupabase();
+  } catch (error: unknown) {
+    return res.status(500).json({ error: errorMessage(error) });
+  }
+
+  const { fields, error: fieldError } = extractAdCandidateFields(body);
+  if (fieldError) {
+    return res.status(400).json({ error: fieldError });
+  }
+
+  // Load the angle to derive the mass desire and confirm ownership.
+  const { data: angleData, error: angleError } = await supabase
+    .from("marketing_angles")
+    .select("*")
+    .eq("id", marketingAngleId)
+    .single();
+
+  if (angleError || !angleData) {
+    return res.status(404).json({
+      error: `Marketing angle not found: ${angleError?.message ?? marketingAngleId}`,
+    });
+  }
+
+  const angle = angleData as MarketingAngle;
+  if (angle.project_id !== projectId) {
+    return res
+      .status(400)
+      .json({ error: "Marketing angle does not belong to this project." });
+  }
+
+  // Link the latest copy set + creative prompt set for this angle if present.
+  const { data: copySetRow } = await supabase
+    .from("ad_copy_sets")
+    .select("id")
+    .eq("marketing_angle_id", marketingAngleId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const adCopySetId = (copySetRow as { id: string } | null)?.id ?? null;
+
+  const { data: promptSetRow } = await supabase
+    .from("creative_prompt_sets")
+    .select("id")
+    .eq("marketing_angle_id", marketingAngleId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const creativePromptSetId = (promptSetRow as { id: string } | null)?.id ?? null;
+
+  // Find an existing active candidate for this angle.
+  const { data: existingRow, error: existingError } = await supabase
+    .from("ad_candidates")
+    .select("*")
+    .eq("project_id", projectId)
+    .eq("marketing_angle_id", marketingAngleId)
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (existingError) {
+    return res.status(500).json({
+      error: `Failed to load ad candidate: ${existingError.message}`,
+    });
+  }
+
+  if (existingRow) {
+    const updates: Record<string, unknown> = {
+      ...fields,
+      ad_copy_set_id: adCopySetId,
+      creative_prompt_set_id: creativePromptSetId,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { data, error } = await supabase
+      .from("ad_candidates")
+      .update(updates)
+      .eq("id", (existingRow as { id: string }).id)
+      .select()
+      .single();
+
+    if (error || !data) {
+      return res.status(500).json({
+        error: `Failed to update ad candidate: ${error?.message ?? "unknown error"}`,
+      });
+    }
+    return res.json({ candidate: data });
+  }
+
+  // No candidate yet → assign the next ad number for this project.
+  const { data: maxRow } = await supabase
+    .from("ad_candidates")
+    .select("ad_number")
+    .eq("project_id", projectId)
+    .order("ad_number", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const nextNumber =
+    ((maxRow as { ad_number: number | null } | null)?.ad_number ?? 0) + 1;
+
+  const insertPayload: Record<string, unknown> = {
+    project_id: projectId,
+    mass_desire_id: angle.mass_desire_id,
+    marketing_angle_id: marketingAngleId,
+    ad_copy_set_id: adCopySetId,
+    creative_prompt_set_id: creativePromptSetId,
+    ad_number: nextNumber,
+    ad_title:
+      typeof fields.ad_title === "string" && fields.ad_title.trim()
+        ? fields.ad_title
+        : angle.angle_name,
+    selected_primary_text: fields.selected_primary_text ?? "",
+    selected_headline: fields.selected_headline ?? "",
+    selected_description: fields.selected_description ?? "",
+    selected_hook: fields.selected_hook ?? "",
+    selected_callouts: fields.selected_callouts ?? [],
+    selected_image_prompts: fields.selected_image_prompts ?? [],
+    status: fields.status ?? "draft",
+    notes: fields.notes ?? "",
+  };
+
+  const { data, error } = await supabase
+    .from("ad_candidates")
+    .insert(insertPayload)
+    .select()
+    .single();
+
+  if (error || !data) {
+    return res.status(500).json({
+      error: `Failed to create ad candidate: ${error?.message ?? "unknown error"}`,
+    });
+  }
+
+  return res.json({ candidate: data });
+});
+
+// List ad candidates for a project.
+app.get("/api/ad-candidates", async (req, res) => {
+  const projectId = req.query.projectId;
+
+  if (typeof projectId !== "string" || projectId.trim().length === 0) {
+    return res
+      .status(400)
+      .json({ error: "Missing or invalid 'projectId' query param." });
+  }
+
+  let supabase: ReturnType<typeof getSupabase>;
+  try {
+    supabase = getSupabase();
+  } catch (error: unknown) {
+    return res.status(500).json({ error: errorMessage(error) });
+  }
+
+  const { data, error } = await supabase
+    .from("ad_candidates")
+    .select("*")
+    .eq("project_id", projectId)
+    .order("ad_number", { ascending: true });
+
+  if (error) {
+    return res.status(500).json({
+      error: `Failed to load ad candidates: ${error.message}`,
+    });
+  }
+
+  return res.json({ candidates: data ?? [] });
+});
+
+// Update fields on a specific ad candidate (status, notes, selections).
+app.patch("/api/ad-candidates/:id", async (req, res) => {
+  const id = req.params.id;
+
+  if (typeof id !== "string" || id.trim().length === 0) {
+    return res.status(400).json({ error: "Missing or invalid candidate id." });
+  }
+
+  let supabase: ReturnType<typeof getSupabase>;
+  try {
+    supabase = getSupabase();
+  } catch (error: unknown) {
+    return res.status(500).json({ error: errorMessage(error) });
+  }
+
+  const { fields, error: fieldError } = extractAdCandidateFields(
+    (req.body ?? {}) as Record<string, unknown>
+  );
+  if (fieldError) {
+    return res.status(400).json({ error: fieldError });
+  }
+
+  if (Object.keys(fields).length === 0) {
+    return res.status(400).json({ error: "No valid fields to update." });
+  }
+
+  const { data, error } = await supabase
+    .from("ad_candidates")
+    .update({ ...fields, updated_at: new Date().toISOString() })
+    .eq("id", id)
+    .select()
+    .single();
+
+  if (error || !data) {
+    return res.status(500).json({
+      error: `Failed to update ad candidate: ${error?.message ?? "unknown error"}`,
+    });
+  }
+
+  return res.json({ candidate: data });
+});
+
+/* ==================================================================== */
+/* Delete a project and all related data                                */
+/* ==================================================================== */
+
+/**
+ * Delete every row for a project from one child table. Treats a missing table
+ * (e.g. compliance_checks / export_packs that were never created) as a no-op,
+ * but surfaces real permission/database errors.
+ */
+async function deleteProjectRows(
+  supabase: ReturnType<typeof getSupabase>,
+  table: string,
+  projectId: string
+): Promise<void> {
+  const { error } = await supabase
+    .from(table)
+    .delete()
+    .eq("project_id", projectId);
+
+  if (!error) return;
+
+  const code = (error as { code?: string }).code;
+  const message = (error.message ?? "").toLowerCase();
+  const tableMissing =
+    code === "42P01" ||
+    message.includes("does not exist") ||
+    message.includes("could not find the table") ||
+    message.includes("schema cache");
+
+  if (tableMissing) return; // optional table not present — safe to skip
+  throw new Error(`Failed to delete from ${table}: ${error.message}`);
+}
+
+app.delete("/api/projects/:projectId", async (req, res) => {
+  const projectId = req.params.projectId;
+
+  if (typeof projectId !== "string" || projectId.trim().length === 0) {
+    return res.status(400).json({ error: "Missing or invalid 'projectId'." });
+  }
+
+  let supabase: ReturnType<typeof getSupabase>;
+  try {
+    supabase = getSupabase();
+  } catch (error: unknown) {
+    return res.status(500).json({ error: errorMessage(error) });
+  }
+
+  // Confirm the project exists before doing any destructive work.
+  const { data: existing, error: lookupError } = await supabase
+    .from("projects")
+    .select("id")
+    .eq("id", projectId)
+    .maybeSingle();
+
+  if (lookupError) {
+    return res
+      .status(500)
+      .json({ error: `Failed to look up project: ${lookupError.message}` });
+  }
+
+  if (!existing) {
+    return res.status(404).json({ error: `Project not found: ${projectId}` });
+  }
+
+  // Delete dependent rows in safe dependency order, then the project itself.
+  // This works whether or not ON DELETE CASCADE is configured.
+  const childTables = [
+    "compliance_checks",
+    "export_packs",
+    "ad_candidates",
+    "desire_concepts",
+    "desire_concept_sets",
+    "creative_prompt_sets",
+    "ad_copy_sets",
+    "marketing_angles",
+    "mass_desires",
+    "generated_outputs",
+    "research_insights",
+    "research_sources",
+    "research_runs",
+  ];
+
+  try {
+    for (const table of childTables) {
+      await deleteProjectRows(supabase, table, projectId);
+    }
+
+    const { error: deleteError } = await supabase
+      .from("projects")
+      .delete()
+      .eq("id", projectId);
+
+    if (deleteError) {
+      throw new Error(`Failed to delete project: ${deleteError.message}`);
+    }
+  } catch (error: unknown) {
+    return res.status(500).json({ error: errorMessage(error) });
+  }
+
+  return res.json({ ok: true, deletedProjectId: projectId });
 });
 
 app.listen(PORT, () => {

@@ -1,9 +1,12 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { normalizeProject } from "../types";
 import type {
+  AdCandidate,
   AdCopySet,
   CreativePromptSet,
   CustomerAvatarOutput,
+  DesireConcept,
+  DesireConceptSet,
   MassDesire,
   MarketingAngle,
   ProductProject,
@@ -269,7 +272,21 @@ export async function fetchAdCopySets(
     throw new Error(error.message);
   }
 
-  return (data ?? []) as AdCopySet[];
+  return (data ?? []).map(normalizeAdCopySet);
+}
+
+/**
+ * Ensure the new simplified copy-pack fields are always arrays, even for older
+ * rows saved before the ad_variations / image_prompts columns existed.
+ */
+export function normalizeAdCopySet(row: unknown): AdCopySet {
+  const set = (row ?? {}) as AdCopySet;
+  return {
+    ...set,
+    ad_variations: Array.isArray(set.ad_variations) ? set.ad_variations : [],
+    image_prompts: Array.isArray(set.image_prompts) ? set.image_prompts : [],
+    is_edited: Boolean(set.is_edited),
+  };
 }
 
 /** Fetch all saved creative prompt sets for a project. */
@@ -291,4 +308,113 @@ export async function fetchCreativePromptSets(
   }
 
   return (data ?? []) as CreativePromptSet[];
+}
+
+function normalizeDesireConcept(row: DesireConcept): DesireConcept {
+  const overlay = row.overlay_recommendation ?? "none";
+  const validOverlays = new Set([
+    "none",
+    "headline_only",
+    "headline_plus_support_line",
+  ]);
+  return {
+    ...row,
+    support_line: row.support_line ?? "",
+    overlay_recommendation: validOverlays.has(overlay)
+      ? overlay
+      : "none",
+  };
+}
+
+/** Fetch all saved TOF concept sets for a project, with nested concepts. */
+export async function fetchDesireConceptSets(
+  projectId: string
+): Promise<DesireConceptSet[]> {
+  if (!supabase) {
+    return [];
+  }
+
+  const { data: sets, error: setsError } = await supabase
+    .from("desire_concept_sets")
+    .select("*")
+    .eq("project_id", projectId)
+    .order("created_at", { ascending: false });
+
+  if (setsError) {
+    if (import.meta.env.DEV) {
+      console.warn("[supabase] fetchDesireConceptSets:", setsError.message);
+    }
+    return [];
+  }
+
+  if (!sets?.length) {
+    return [];
+  }
+
+  const { data: concepts, error: conceptsError } = await supabase
+    .from("desire_concepts")
+    .select("*")
+    .eq("project_id", projectId)
+    .order("concept_number", { ascending: true });
+
+  if (conceptsError) {
+    if (import.meta.env.DEV) {
+      console.warn("[supabase] fetchDesireConceptSets concepts:", conceptsError.message);
+    }
+    return [];
+  }
+
+  const conceptsBySet = new Map<string, DesireConcept[]>();
+  for (const row of concepts ?? []) {
+    const concept = normalizeDesireConcept(row as DesireConcept);
+    const list = conceptsBySet.get(concept.concept_set_id) ?? [];
+    list.push(concept);
+    conceptsBySet.set(concept.concept_set_id, list);
+  }
+
+  return (sets as Omit<DesireConceptSet, "concepts">[]).map((set) => ({
+    ...set,
+    concepts: conceptsBySet.get(set.id) ?? [],
+  }));
+}
+
+function normalizeAdCandidate(row: AdCandidate): AdCandidate {
+  return {
+    ...row,
+    ad_title: row.ad_title ?? "",
+    selected_primary_text: row.selected_primary_text ?? "",
+    selected_headline: row.selected_headline ?? "",
+    selected_description: row.selected_description ?? "",
+    selected_hook: row.selected_hook ?? "",
+    selected_callouts: row.selected_callouts ?? [],
+    selected_image_prompts: row.selected_image_prompts ?? [],
+    status: row.status ?? "draft",
+    notes: row.notes ?? "",
+  };
+}
+
+/** Fetch all saved ad candidates for a project. Empty array if unavailable. */
+export async function fetchAdCandidates(
+  projectId: string
+): Promise<AdCandidate[]> {
+  if (!supabase) {
+    return [];
+  }
+
+  const { data, error } = await supabase
+    .from("ad_candidates")
+    .select("*")
+    .eq("project_id", projectId)
+    .order("ad_number", { ascending: true });
+
+  if (error) {
+    // The ad_candidates table may not exist yet (migration not run). Treat as
+    // empty rather than breaking the whole workflow.
+    if (import.meta.env.DEV) {
+      console.warn("[supabase] fetchAdCandidates:", error.message);
+    }
+    return [];
+  }
+
+  return ((data ?? []) as AdCandidate[]).map(normalizeAdCandidate);
 }

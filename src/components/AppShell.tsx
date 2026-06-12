@@ -1,9 +1,12 @@
 import { Boxes } from "lucide-react";
 import type {
+  AdCandidate,
+  AdCandidatePatch,
   AdCopySet,
   AngleReviewPatch,
   CreativePromptSet,
   CustomerAvatarOutput,
+  DesireConceptSet,
   MarketingAngle,
   MassDesire,
   ProductProject,
@@ -11,20 +14,15 @@ import type {
   ResearchInsight,
   ResearchSource,
 } from "../types";
-import type {
-  InsightSectionKey,
-  ModeStatus,
-  SelectedItem,
-  WorkflowMode,
-} from "./workflow";
+import type { ModeStatus, WorkflowMode } from "./workflow";
 import { LeftRail } from "./LeftRail";
-import { InspectorPanel } from "./InspectorPanel";
 import { SetupWorkspace } from "./SetupWorkspace";
-import { ResearchGrid } from "./ResearchGrid";
-import { InsightsWorkspace } from "./InsightsWorkspace";
-import { StrategyMatrix } from "./StrategyMatrix";
-import { CreativeWorkspace } from "./CreativeWorkspace";
-import { ReviewWorkspace } from "./ReviewWorkspace";
+import { ResearchWorkspace } from "./ResearchWorkspace";
+import { InsightReportWorkspace } from "./InsightReportWorkspace";
+import { CustomerAvatarWorkspace } from "./CustomerAvatarWorkspace";
+import { StrategyWorkspace } from "./StrategyWorkspace";
+import { AdsWorkspace } from "./AdsWorkspace";
+import { AdditionalContentWorkspace } from "./AdditionalContentWorkspace";
 
 export interface AppShellProps {
   // Projects + brief
@@ -33,6 +31,8 @@ export interface AppShellProps {
   selectedProject: ProductProject | null;
   isProjectsLoading: boolean;
   onSelectProject: (id: string) => void;
+  deletingProjectId: string | null;
+  onDeleteProject: (id: string) => void;
   form: ProductProjectInput;
   onUpdateField: <K extends keyof ProductProjectInput>(
     key: K,
@@ -42,12 +42,10 @@ export interface AppShellProps {
   isCreating: boolean;
   createError: string | null;
 
-  // Mode + selection
+  // Mode
   mode: WorkflowMode;
   onChangeMode: (mode: WorkflowMode) => void;
   statuses: Record<WorkflowMode, ModeStatus>;
-  selectedItem: SelectedItem | null;
-  onSelectItem: (item: SelectedItem | null) => void;
 
   statusMessage: string | null;
 
@@ -58,7 +56,9 @@ export interface AppShellProps {
   desires: MassDesire[];
   angles: MarketingAngle[];
   copySets: AdCopySet[];
+  conceptSets: DesireConceptSet[];
   creativePromptSets: CreativePromptSet[];
+  adCandidates: AdCandidate[];
 
   // Loading / generating / errors
   isResearching: boolean;
@@ -77,10 +77,15 @@ export interface AppShellProps {
   anglesError: string | null;
   generatingCopyAngleId: string | null;
   copyError: string | null;
+  generatingTofDesireId: string | null;
+  tofError: string | null;
   generatingCreativePromptAngleId: string | null;
   creativePromptError: string | null;
   savingReviewAngleId: string | null;
   reviewError: string | null;
+  candidateError: string | null;
+  savingCandidateAngleId: string | null;
+  savingCandidateId: string | null;
 
   // Actions
   onRunResearch: () => void;
@@ -89,38 +94,128 @@ export interface AppShellProps {
   onGenerateDesires: () => void;
   onGenerateAngles: () => void;
   onGenerateCopy: (angleId: string) => void;
+  onGenerateTofConcepts: (desireId: string) => void;
+  onOpenTofConcepts: (conceptSet: DesireConceptSet) => void;
   onGenerateCreativePrompts: (angleId: string, adCopySetId: string) => void;
   onUpdateAngleReview: (angleId: string, updates: AngleReviewPatch) => void;
+  onUpsertCandidate: (angleId: string, patch: AdCandidatePatch) => void;
+  onPatchCandidate: (id: string, patch: AdCandidatePatch) => void;
+  onOpenCopyPack: (copySet: AdCopySet, angleName: string) => void;
 }
 
 export function AppShell(props: AppShellProps) {
-  const {
-    selectedProject,
-    mode,
-    statusMessage,
-    selectedItem,
-    onSelectItem,
-  } = props;
+  const { selectedProject, mode, statusMessage } = props;
 
-  const selectedAngleId =
-    selectedItem?.type === "angle" ? selectedItem.id : null;
-  const selectedDesireId =
-    selectedItem?.type === "desire" ? selectedItem.id : null;
-  const selectedSourceId =
-    selectedItem?.type === "source" ? selectedItem.id : null;
+  function renderWorkspace() {
+    if (!selectedProject) {
+      return (
+        <div className="empty-state">
+          <Boxes size={40} strokeWidth={1.5} />
+          <p>
+            {props.projects.length === 0
+              ? "No projects yet. Create one in the left rail to begin."
+              : "Select a project to begin."}
+          </p>
+        </div>
+      );
+    }
 
-  function selectInsight(section: InsightSectionKey, index: number) {
-    onSelectItem({ type: "insight", section, index });
+    switch (mode) {
+      case "setup":
+        return <SetupWorkspace project={selectedProject} />;
+      case "research":
+        return (
+          <ResearchWorkspace
+            sources={props.sources}
+            isResearching={props.isResearching}
+            isLoading={props.isSourcesLoading}
+            error={props.researchError}
+            onRunResearch={props.onRunResearch}
+          />
+        );
+      case "insight_report":
+        return (
+          <InsightReportWorkspace
+            insight={props.insight}
+            hasResearch={props.sources.length > 0}
+            isGeneratingInsight={props.isGeneratingInsight}
+            isInsightLoading={props.isInsightLoading}
+            insightError={props.insightError}
+            onGenerateInsight={props.onGenerateInsight}
+          />
+        );
+      case "avatar":
+        return (
+          <CustomerAvatarWorkspace
+            avatar={props.avatar}
+            hasInsight={Boolean(props.insight)}
+            isGeneratingAvatar={props.isGeneratingAvatar}
+            isAvatarLoading={props.isAvatarLoading}
+            avatarError={props.avatarError}
+            onGenerateAvatar={props.onGenerateAvatar}
+          />
+        );
+      case "strategy":
+        return (
+          <StrategyWorkspace
+            desires={props.desires}
+            angles={props.angles}
+            copySets={props.copySets}
+            conceptSets={props.conceptSets}
+            isGeneratingDesires={props.isGeneratingDesires}
+            isGeneratingAngles={props.isGeneratingAngles}
+            isLoading={props.isDesiresLoading}
+            desiresError={props.desiresError}
+            anglesError={props.anglesError}
+            copyError={props.copyError}
+            tofError={props.tofError}
+            onGenerateDesires={props.onGenerateDesires}
+            onGenerateAngles={props.onGenerateAngles}
+            generatingTofDesireId={props.generatingTofDesireId}
+            generatingCopyAngleId={props.generatingCopyAngleId}
+            savingReviewAngleId={props.savingReviewAngleId}
+            onGenerateTofConcepts={props.onGenerateTofConcepts}
+            onOpenTofConcepts={props.onOpenTofConcepts}
+            onGenerateCopy={props.onGenerateCopy}
+            onUpdateAngleReview={props.onUpdateAngleReview}
+            onOpenCopyPack={props.onOpenCopyPack}
+          />
+        );
+      case "ads":
+        return (
+          <AdsWorkspace
+            desires={props.desires}
+            angles={props.angles}
+            copySets={props.copySets}
+            onGoToStrategy={() => props.onChangeMode("strategy")}
+          />
+        );
+      case "additional":
+        return (
+          <AdditionalContentWorkspace
+            angles={props.angles}
+            copySets={props.copySets}
+            creativePromptSets={props.creativePromptSets}
+            adCandidates={props.adCandidates}
+            sources={props.sources}
+            insight={props.insight}
+          />
+        );
+      default:
+        return null;
+    }
   }
 
   return (
-    <div className="command-centre">
+    <div className="command-centre command-centre-full">
       <LeftRail
         projects={props.projects}
         selectedId={props.selectedId}
         selectedProject={selectedProject}
         isLoading={props.isProjectsLoading}
         onSelectProject={props.onSelectProject}
+        deletingProjectId={props.deletingProjectId}
+        onDeleteProject={props.onDeleteProject}
         mode={mode}
         statuses={props.statuses}
         onChangeMode={props.onChangeMode}
@@ -137,109 +232,8 @@ export function AppShell(props: AppShellProps) {
             {statusMessage}
           </div>
         ) : null}
-
-        {!selectedProject ? (
-          <div className="empty-state">
-            <Boxes size={40} strokeWidth={1.5} />
-            <p>
-              {props.projects.length === 0
-                ? "No projects yet. Create one in the left rail to begin."
-                : "Select a project to begin."}
-            </p>
-          </div>
-        ) : mode === "setup" ? (
-          <SetupWorkspace project={selectedProject} />
-        ) : mode === "research" ? (
-          <ResearchGrid
-            sources={props.sources}
-            isResearching={props.isResearching}
-            isLoading={props.isSourcesLoading}
-            error={props.researchError}
-            onRunResearch={props.onRunResearch}
-            selectedSourceId={selectedSourceId}
-            onSelectSource={(id) => onSelectItem({ type: "source", id })}
-          />
-        ) : mode === "insights" ? (
-          <InsightsWorkspace
-            insight={props.insight}
-            isGeneratingInsight={props.isGeneratingInsight}
-            isInsightLoading={props.isInsightLoading}
-            insightError={props.insightError}
-            onGenerateInsight={props.onGenerateInsight}
-            avatar={props.avatar}
-            isGeneratingAvatar={props.isGeneratingAvatar}
-            isAvatarLoading={props.isAvatarLoading}
-            avatarError={props.avatarError}
-            onGenerateAvatar={props.onGenerateAvatar}
-            selectedItem={selectedItem}
-            onSelectInsight={selectInsight}
-            onSelectAvatar={() => onSelectItem({ type: "avatar" })}
-          />
-        ) : mode === "strategy" ? (
-          <StrategyMatrix
-            desires={props.desires}
-            angles={props.angles}
-            copySets={props.copySets}
-            creativePromptSets={props.creativePromptSets}
-            isGeneratingDesires={props.isGeneratingDesires}
-            isGeneratingAngles={props.isGeneratingAngles}
-            isLoading={props.isDesiresLoading}
-            desiresError={props.desiresError}
-            anglesError={props.anglesError}
-            onGenerateDesires={props.onGenerateDesires}
-            onGenerateAngles={props.onGenerateAngles}
-            generatingCopyAngleId={props.generatingCopyAngleId}
-            generatingCreativePromptAngleId={
-              props.generatingCreativePromptAngleId
-            }
-            selectedAngleId={selectedAngleId}
-            selectedDesireId={selectedDesireId}
-            onSelectAngle={(id) => onSelectItem({ type: "angle", id })}
-            onSelectDesire={(id) => onSelectItem({ type: "desire", id })}
-          />
-        ) : mode === "creative" ? (
-          <CreativeWorkspace
-            angles={props.angles}
-            copySets={props.copySets}
-            creativePromptSets={props.creativePromptSets}
-            copyError={props.copyError}
-            creativePromptError={props.creativePromptError}
-            generatingCopyAngleId={props.generatingCopyAngleId}
-            generatingCreativePromptAngleId={
-              props.generatingCreativePromptAngleId
-            }
-            selectedAngleId={selectedAngleId}
-            onSelectAngle={(id) => onSelectItem({ type: "angle", id })}
-          />
-        ) : (
-          <ReviewWorkspace
-            angles={props.angles}
-            copySets={props.copySets}
-            creativePromptSets={props.creativePromptSets}
-            reviewError={props.reviewError}
-            selectedAngleId={selectedAngleId}
-            onSelectAngle={(id) => onSelectItem({ type: "angle", id })}
-          />
-        )}
+        {renderWorkspace()}
       </main>
-
-      <InspectorPanel
-        selectedItem={selectedItem}
-        project={selectedProject}
-        sources={props.sources}
-        insight={props.insight}
-        avatar={props.avatar}
-        desires={props.desires}
-        angles={props.angles}
-        copySets={props.copySets}
-        creativePromptSets={props.creativePromptSets}
-        generatingCopyAngleId={props.generatingCopyAngleId}
-        generatingCreativePromptAngleId={props.generatingCreativePromptAngleId}
-        savingReviewAngleId={props.savingReviewAngleId}
-        onGenerateCopy={props.onGenerateCopy}
-        onGenerateCreativePrompts={props.onGenerateCreativePrompts}
-        onUpdateAngleReview={props.onUpdateAngleReview}
-      />
     </div>
   );
 }

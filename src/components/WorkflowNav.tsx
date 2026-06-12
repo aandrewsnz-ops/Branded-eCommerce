@@ -2,9 +2,10 @@ import {
   Search,
   FileText,
   Layers,
-  Sparkles,
-  ClipboardCheck,
   Settings2,
+  Archive,
+  UserRound,
+  ImageIcon,
 } from "lucide-react";
 import type { ModeStatus, WorkflowMode } from "./workflow";
 import { WORKFLOW_MODES } from "./workflow";
@@ -12,10 +13,11 @@ import { WORKFLOW_MODES } from "./workflow";
 const MODE_ICONS: Record<WorkflowMode, typeof Search> = {
   setup: Settings2,
   research: Search,
-  insights: FileText,
+  insight_report: FileText,
+  avatar: UserRound,
   strategy: Layers,
-  creative: Sparkles,
-  review: ClipboardCheck,
+  ads: ImageIcon,
+  additional: Archive,
 };
 
 const STATUS_LABELS: Record<ModeStatus, string> = {

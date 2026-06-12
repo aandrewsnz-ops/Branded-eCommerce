@@ -1,6 +1,7 @@
 import type {
   AdCopySet,
   CreativePromptSet,
+  DesireConceptSet,
   ImagePrompt,
   MarketingAngle,
   ResearchSource,
@@ -10,10 +11,11 @@ import type {
 export type WorkflowMode =
   | "setup"
   | "research"
-  | "insights"
+  | "insight_report"
+  | "avatar"
   | "strategy"
-  | "creative"
-  | "review";
+  | "ads"
+  | "additional";
 
 export interface WorkflowModeDef {
   id: WorkflowMode;
@@ -23,34 +25,14 @@ export interface WorkflowModeDef {
 export const WORKFLOW_MODES: readonly WorkflowModeDef[] = [
   { id: "setup", label: "Setup" },
   { id: "research", label: "Research" },
-  { id: "insights", label: "Insights" },
+  { id: "insight_report", label: "Insight Report" },
+  { id: "avatar", label: "Customer Avatar" },
   { id: "strategy", label: "Strategy" },
-  { id: "creative", label: "Creative" },
-  { id: "review", label: "Review" },
+  { id: "ads", label: "Ads" },
+  { id: "additional", label: "Additional Content" },
 ] as const;
 
 export type ModeStatus = "missing" | "ready" | "done";
-
-/** Discriminated union describing the item shown in the right inspector. */
-export type SelectedItem =
-  | { type: "project" }
-  | { type: "source"; id: string }
-  | { type: "insight"; section: InsightSectionKey; index: number }
-  | { type: "avatar" }
-  | { type: "desire"; id: string }
-  | { type: "angle"; id: string }
-  | { type: "copy"; id: string }
-  | { type: "creative"; id: string };
-
-export type InsightSectionKey =
-  | "pain_clusters"
-  | "language_patterns"
-  | "emotional_states"
-  | "failed_solutions"
-  | "hopes"
-  | "fears"
-  | "copywriting_notes"
-  | "compliance_warnings";
 
 /* ------------------------------------------------------------------ */
 /* Research filters                                                    */
@@ -62,7 +44,8 @@ export type ResearchFilterId =
   | "strongest_pain"
   | "best_quotes"
   | "failed_solutions"
-  | "creative_inspiration";
+  | "creative_inspiration"
+  | "ignored";
 
 export const RESEARCH_FILTERS: readonly { id: ResearchFilterId; label: string }[] =
   [
@@ -72,7 +55,29 @@ export const RESEARCH_FILTERS: readonly { id: ResearchFilterId; label: string }[
     { id: "best_quotes", label: "Best quotes" },
     { id: "failed_solutions", label: "Failed solutions" },
     { id: "creative_inspiration", label: "Creative inspiration" },
+    { id: "ignored", label: "Ignored" },
   ] as const;
+
+/* ------------------------------------------------------------------ */
+/* Local research selection model (UI-only, not persisted)            */
+/* ------------------------------------------------------------------ */
+
+export type ResearchTagId =
+  | "top_pain"
+  | "best_quote"
+  | "use_for_angle"
+  | "use_for_creative"
+  | "ignore";
+
+export const RESEARCH_TAGS: readonly { id: ResearchTagId; label: string }[] = [
+  { id: "top_pain", label: "Top pain" },
+  { id: "best_quote", label: "Best quote" },
+  { id: "use_for_angle", label: "Use for angles" },
+  { id: "use_for_creative", label: "Creative inspiration" },
+  { id: "ignore", label: "Ignore" },
+] as const;
+
+export type ResearchSelectionMap = Record<string, ResearchTagId[]>;
 
 const PAIN_KEYWORDS = [
   "pain",
@@ -286,6 +291,38 @@ export function copySetForAngle(
   return copySets.find((set) => set.marketing_angle_id === angleId);
 }
 
+export function conceptSetForDesire(
+  desireId: string,
+  conceptSets: DesireConceptSet[]
+): DesireConceptSet | undefined {
+  return conceptSets.find((set) => set.mass_desire_id === desireId);
+}
+
+/** True when at least one ad in the copy pack is marked as a winner. */
+export function copySetHasWinners(copySet: AdCopySet | undefined): boolean {
+  if (!copySet?.ad_variations?.length) return false;
+  return copySet.ad_variations.some((ad) => Boolean(ad.is_winner));
+}
+
+/** Count ads with an uploaded image URL. */
+export function copySetUploadedImageCount(
+  copySet: AdCopySet | undefined
+): number {
+  if (!copySet?.ad_variations?.length) return 0;
+  return copySet.ad_variations.filter((ad) => Boolean(ad.image_url?.trim()))
+    .length;
+}
+
+/** Badge label for Strategy cards when images have been uploaded. */
+export function copySetImageBadgeLabel(
+  copySet: AdCopySet | undefined
+): string | null {
+  const count = copySetUploadedImageCount(copySet);
+  if (count === 0) return null;
+  if (count >= 5) return "5 Images Added";
+  return "Images Added";
+}
+
 export function creativeSetForAngle(
   angleId: string,
   copySets: AdCopySet[],
@@ -294,4 +331,162 @@ export function creativeSetForAngle(
   const copySet = copySetForAngle(angleId, copySets);
   if (!copySet) return undefined;
   return creativePromptSets.find((set) => set.ad_copy_set_id === copySet.id);
+}
+
+export function creativeSetForAngleDirect(
+  angleId: string,
+  creativePromptSets: CreativePromptSet[]
+): CreativePromptSet | undefined {
+  return creativePromptSets.find((set) => set.marketing_angle_id === angleId);
+}
+
+/* ------------------------------------------------------------------ */
+/* Creatives First Cut filters                                         */
+/* ------------------------------------------------------------------ */
+
+export type FirstCutFilterId =
+  | "all"
+  | "shortlisted"
+  | "rejected"
+  | "maybe"
+  | "needs_copy"
+  | "has_copy"
+  | "needs_creative"
+  | "has_creative";
+
+export const FIRST_CUT_FILTERS: readonly {
+  id: FirstCutFilterId;
+  label: string;
+}[] = [
+  { id: "all", label: "All" },
+  { id: "shortlisted", label: "Shortlisted" },
+  { id: "rejected", label: "Rejected" },
+  { id: "maybe", label: "Maybe" },
+  { id: "needs_copy", label: "Needs quick copy" },
+  { id: "has_copy", label: "Has quick copy" },
+  { id: "needs_creative", label: "Needs creative prompts" },
+  { id: "has_creative", label: "Has creative prompts" },
+] as const;
+
+export function firstCutMatchesFilter(
+  filter: FirstCutFilterId,
+  angle: MarketingAngle,
+  hasCopy: boolean,
+  hasCreative: boolean
+): boolean {
+  switch (filter) {
+    case "all":
+      return true;
+    case "shortlisted":
+      return angle.is_shortlisted || angle.review_status === "shortlisted";
+    case "rejected":
+      return angle.review_status === "rejected";
+    case "maybe":
+      // "Maybe" is represented by the untested-but-noted middle ground.
+      return angle.review_status === "untested" && !angle.is_shortlisted;
+    case "needs_copy":
+      return !hasCopy;
+    case "has_copy":
+      return hasCopy;
+    case "needs_creative":
+      return hasCopy && !hasCreative;
+    case "has_creative":
+      return hasCreative;
+    default:
+      return true;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Competitor URL → clean label                                        */
+/* ------------------------------------------------------------------ */
+
+const DOMAIN_LABELS: Record<string, string> = {
+  "amazon.com": "Amazon",
+  "amazon.co.uk": "Amazon UK",
+  "aliexpress.com": "AliExpress",
+  "alibaba.com": "Alibaba",
+  "tiktok.com": "TikTok Shop",
+  "shop.tiktok.com": "TikTok Shop",
+  "etsy.com": "Etsy",
+  "ebay.com": "eBay",
+  "walmart.com": "Walmart",
+  "shopify.com": "Shopify",
+  "temu.com": "Temu",
+  "youtube.com": "YouTube",
+  "instagram.com": "Instagram",
+};
+
+export interface CompetitorLink {
+  href: string;
+  label: string;
+}
+
+function titleCaseFromSlug(slug: string): string {
+  const cleaned = slug
+    .replace(/\.(html?|php|aspx)$/i, "")
+    .replace(/[-_+]+/g, " ")
+    .replace(/%[0-9a-f]{2}/gi, " ")
+    .trim();
+  if (!cleaned) return "";
+  // Drop obvious id-only segments (all digits or very short).
+  if (/^\d+$/.test(cleaned)) return "";
+  return cleaned
+    .split(/\s+/)
+    .filter((word) => word.length > 1 && !/^\d+$/.test(word))
+    .slice(0, 7)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
+/**
+ * Build a clean "Domain - Product title" label for a competitor URL so the UI
+ * never shows a long raw URL. Falls back to the domain only when no sensible
+ * title can be inferred. Always returns a clickable href (the full URL).
+ */
+export function formatCompetitorLink(rawUrl: string): CompetitorLink | null {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return null;
+
+  let url: URL;
+  try {
+    url = new URL(trimmed.includes("://") ? trimmed : `https://${trimmed}`);
+  } catch {
+    return { href: trimmed, label: trimmed };
+  }
+
+  const host = url.hostname.replace(/^www\./, "");
+  const fallbackDomain =
+    host
+      .split(".")
+      .slice(0, -1)
+      .join(".")
+      .replace(/^./, (c) => c.toUpperCase()) || host;
+  const domainLabel = DOMAIN_LABELS[host] ?? fallbackDomain;
+
+  const segments = url.pathname.split("/").filter(Boolean);
+  let title = "";
+  for (let i = segments.length - 1; i >= 0; i -= 1) {
+    const candidate = titleCaseFromSlug(decodeURIComponent(segments[i]));
+    if (candidate.length >= 3) {
+      title = candidate;
+      break;
+    }
+  }
+
+  return {
+    href: url.toString(),
+    label: title ? `${domainLabel} - ${title}` : domainLabel,
+  };
+}
+
+/** Split a multi-URL string (newline or comma separated) into clean links. */
+export function parseCompetitorLinks(raw: string): CompetitorLink[] {
+  if (!raw.trim()) return [];
+  return raw
+    .split(/[\n,]+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map(formatCompetitorLink)
+    .filter((link): link is CompetitorLink => link !== null);
 }

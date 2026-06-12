@@ -7,8 +7,8 @@ import type { ProductProject, ResearchSourceDraft } from "../src/types";
  */
 export const OPENAI_MODEL = "gpt-5.5";
 
-/** Number of sources to gather for this MVP. The next version will raise this. */
-export const RESEARCH_SOURCE_COUNT = 5;
+/** Number of research sources to gather per run. */
+export const RESEARCH_SOURCE_COUNT = 10;
 
 /** Error thrown when the model response cannot be parsed as the expected JSON. */
 export class ResearchParseError extends Error {
@@ -39,13 +39,30 @@ function buildPrompt(project: ProductProject): string {
     "Look at sources like Reddit, forums, Quora, blog comments, review threads,",
     "and social posts.",
     "",
-    `Find exactly ${RESEARCH_SOURCE_COUNT} high-quality sources.`,
+    `Find exactly ${RESEARCH_SOURCE_COUNT} high-quality sources. Return exactly`,
+    `${RESEARCH_SOURCE_COUNT} — never fewer, never filler. Every source must be`,
+    "a genuine, distinct, high-relevance source. Do NOT pad the list with weak or",
+    "duplicate sources just to reach the count; instead keep searching until you",
+    `have ${RESEARCH_SOURCE_COUNT} strong ones.`,
     "",
     "Focus ONLY on the human, emotional layer of the underlying problem:",
     "- emotional pain, frustration, fear, anxiety",
     "- the exact language and phrases real people use",
     "- failed solutions they have already tried",
     "- rock-bottom / breaking-point moments",
+    "",
+    `Aim for a useful SPREAD across the ${RESEARCH_SOURCE_COUNT} sources, covering`,
+    "(combine where a single strong source covers several):",
+    "1. Strongest pain point source",
+    "2. Strongest customer language / verbatim phrasing source",
+    "3. Failed solutions source",
+    "4. Emotional insecurity source",
+    "5. Competitor or category positioning source",
+    "6. Price or affordability source (if relevant to this market)",
+    "7. Routine or usage behaviour source",
+    "8. Visual / creative inspiration source",
+    "9. Objection or skepticism source",
+    "10. Additional high-relevance market pain source",
     "",
     "Strict rules:",
     "- Research the UNDERLYING PROBLEM, not this specific product.",
@@ -129,18 +146,26 @@ function normalizeSources(parsed: unknown): ResearchSourceDraft[] {
     throw new Error('Parsed JSON did not contain a "sources" array.');
   }
 
-  return sourcesRaw.map((item) => {
-    const record = (item ?? {}) as Record<string, unknown>;
-    return {
-      url: toStringValue(record.url),
-      platform: toStringValue(record.platform),
-      title: toStringValue(record.title),
-      summary: toStringValue(record.summary),
-      emotional_theme: toStringValue(record.emotional_theme),
-      relevance_score: toScore(record.relevance_score),
-      useful_phrases: toStringArray(record.useful_phrases),
-    };
-  });
+  return sourcesRaw
+    .map((item) => {
+      const record = (item ?? {}) as Record<string, unknown>;
+      return {
+        url: toStringValue(record.url),
+        platform: toStringValue(record.platform),
+        title: toStringValue(record.title),
+        summary: toStringValue(record.summary),
+        emotional_theme: toStringValue(record.emotional_theme),
+        relevance_score: toScore(record.relevance_score),
+        useful_phrases: toStringArray(record.useful_phrases),
+      };
+    })
+    // Drop completely empty filler entries so we never insert blank sources.
+    .filter(
+      (source) =>
+        source.title.trim().length > 0 ||
+        source.url.trim().length > 0 ||
+        source.summary.trim().length > 0
+    );
 }
 
 /**

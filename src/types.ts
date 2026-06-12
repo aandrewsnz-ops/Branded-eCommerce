@@ -366,6 +366,7 @@ export type AngleReviewStatus =
   | "untested"
   | "shortlisted"
   | "rejected"
+  | "published"
   | "needs_copy"
   | "ready_for_creative"
   | "ready_to_publish";
@@ -374,6 +375,7 @@ export const ANGLE_REVIEW_STATUSES: readonly AngleReviewStatus[] = [
   "untested",
   "shortlisted",
   "rejected",
+  "published",
   "needs_copy",
   "ready_for_creative",
   "ready_to_publish",
@@ -460,6 +462,35 @@ export interface CopyComplianceNote {
   safer_direction: string;
 }
 
+/** A single ad variation: copy paired with its visual strategy + image prompt. */
+export interface AdVariation {
+  primary: string;
+  headline: string;
+  description: string;
+  visual_strategy: string;
+  image_prompt: string;
+  /** Per-ad lock so regeneration can be blocked. Defaults to false. */
+  locked?: boolean;
+  /** User-marked winning ad. Defaults to false. */
+  is_winner?: boolean;
+  /** Public URL of an uploaded ad image in Supabase Storage. */
+  image_url?: string;
+  /** Storage object path within the ad-images bucket. */
+  image_path?: string;
+  /** Original filename at upload time. */
+  image_filename?: string;
+  /** ISO timestamp when the image was uploaded. */
+  image_uploaded_at?: string;
+  /** MIME type of the uploaded image, e.g. image/png. */
+  image_file_type?: string;
+  /** ISO timestamp of the last per-ad regeneration. */
+  last_regenerated_at?: string;
+  /** Number of times this ad has been regenerated. Defaults to 0. */
+  revision_count?: number;
+}
+
+export type RegenerateMode = "full_ad" | "image_prompt_only";
+
 /** Ad copy content produced by OpenAI (before DB metadata). */
 export interface AdCopyContent {
   long_form_story: string;
@@ -471,6 +502,10 @@ export interface AdCopyContent {
   hook_transitions: HookTransition[];
   callouts: Callout[];
   compliance_notes: CopyComplianceNote[];
+  /** New simplified copy pack: exactly 5 ad variations. */
+  ad_variations?: AdVariation[];
+  /** New simplified copy pack: exactly 5 ChatGPT image-generation prompts. */
+  image_prompts?: string[];
 }
 
 /** A saved row from the ad_copy_sets table. */
@@ -481,9 +516,19 @@ export interface AdCopySet extends AdCopyContent {
   marketing_angle_id: string;
   run_id: string | null;
   created_at: string;
+  /** True once the user has edited the generated copy pack in-app. */
+  is_edited?: boolean;
 }
 
 export interface GenerateCopyResponse {
+  copySet: AdCopySet;
+}
+
+export interface UpdateCopyResponse {
+  copySet: AdCopySet;
+}
+
+export interface RegenerateCopyResponse {
   copySet: AdCopySet;
 }
 
@@ -545,4 +590,108 @@ export interface CreativePromptSet extends CreativePromptContent {
 
 export interface GenerateCreativePromptsResponse {
   promptSet: CreativePromptSet;
+}
+
+/* ------------------------------------------------------------------ */
+/* Top-of-funnel desire concepts (mass desire level)                  */
+/* ------------------------------------------------------------------ */
+
+export type TofOverlayRecommendation =
+  | "none"
+  | "headline_only"
+  | "headline_plus_support_line";
+
+/** A single top-of-funnel concept row from desire_concepts. */
+export interface DesireConcept {
+  id: string;
+  concept_set_id: string;
+  project_id: string;
+  mass_desire_id: string;
+  concept_number: number;
+  concept_title: string;
+  headline: string;
+  support_line: string;
+  overlay_recommendation: TofOverlayRecommendation;
+  visual_strategy: string;
+  rationale: string;
+  image_prompt: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Parent set + nested concepts for one mass desire. */
+export interface DesireConceptSet {
+  id: string;
+  project_id: string;
+  mass_desire_id: string;
+  source_desire_title: string;
+  source_desire_summary: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  concepts: DesireConcept[];
+}
+
+/** Content shape returned by OpenAI before DB persistence. */
+export interface TofConceptDraft {
+  concept_title: string;
+  headline: string;
+  support_line: string;
+  overlay_recommendation: TofOverlayRecommendation;
+  visual_strategy: string;
+  rationale: string;
+  image_prompt: string;
+}
+
+export interface GenerateTofConceptsResponse {
+  conceptSet: DesireConceptSet;
+}
+
+/* ------------------------------------------------------------------ */
+/* Ad candidates (selected, publishable ad units)                     */
+/* ------------------------------------------------------------------ */
+
+export type AdCandidateStatus = "draft" | "ready" | "needs_revision";
+
+/** A saved row from the ad_candidates table. One active candidate per angle. */
+export interface AdCandidate {
+  id: string;
+  project_id: string;
+  mass_desire_id: string | null;
+  marketing_angle_id: string;
+  ad_copy_set_id: string | null;
+  creative_prompt_set_id: string | null;
+  ad_number: number | null;
+  ad_title: string;
+  selected_primary_text: string;
+  selected_headline: string;
+  selected_description: string;
+  selected_hook: string;
+  selected_callouts: string[];
+  selected_image_prompts: ImagePrompt[];
+  status: AdCandidateStatus;
+  notes: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Fields a user can set on an ad candidate from the UI. */
+export interface AdCandidatePatch {
+  ad_title?: string;
+  selected_primary_text?: string;
+  selected_headline?: string;
+  selected_description?: string;
+  selected_hook?: string;
+  selected_callouts?: string[];
+  selected_image_prompts?: ImagePrompt[];
+  status?: AdCandidateStatus;
+  notes?: string;
+}
+
+export interface UpsertAdCandidateResponse {
+  candidate: AdCandidate;
+}
+
+export interface GetAdCandidatesResponse {
+  candidates: AdCandidate[];
 }

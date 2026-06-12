@@ -1,38 +1,67 @@
 import { useState } from "react";
-import { AlertTriangle, ExternalLink, Loader2, Search } from "lucide-react";
+import { AlertTriangle, Loader2, Search } from "lucide-react";
 import type { ResearchSource } from "../types";
-import type { ResearchFilterId } from "./workflow";
-import { RESEARCH_FILTERS, applyResearchFilter } from "./workflow";
+import {
+  RESEARCH_FILTERS,
+  applyResearchFilter,
+  type ResearchFilterId,
+  type ResearchSelectionMap,
+  type ResearchTagId,
+} from "./workflow";
+import { ResearchSourceCard } from "./ResearchSourceCard";
 
-interface ResearchGridProps {
+interface ResearchWorkspaceProps {
   sources: ResearchSource[];
   isResearching: boolean;
   isLoading: boolean;
   error: string | null;
   onRunResearch: () => void;
-  selectedSourceId: string | null;
-  onSelectSource: (id: string) => void;
 }
 
-export function ResearchGrid({
+export function ResearchWorkspace({
   sources,
   isResearching,
   isLoading,
   error,
   onRunResearch,
-  selectedSourceId,
-  onSelectSource,
-}: ResearchGridProps) {
+}: ResearchWorkspaceProps) {
   const [filter, setFilter] = useState<ResearchFilterId>("all");
-  const filtered = applyResearchFilter(sources, filter);
+  // Selection is UI-only local state (the data model has no selection columns).
+  const [selection, setSelection] = useState<ResearchSelectionMap>({});
+
+  function toggleTag(sourceId: string, tag: ResearchTagId) {
+    setSelection((prev) => {
+      const current = prev[sourceId] ?? [];
+      const next = current.includes(tag)
+        ? current.filter((t) => t !== tag)
+        : [...current, tag];
+      return { ...prev, [sourceId]: next };
+    });
+  }
+
+  const ignoredIds = new Set(
+    Object.entries(selection)
+      .filter(([, tags]) => tags.includes("ignore"))
+      .map(([id]) => id)
+  );
+
+  let visible: ResearchSource[];
+  if (filter === "ignored") {
+    visible = sources.filter((s) => ignoredIds.has(s.id));
+  } else {
+    visible = applyResearchFilter(sources, filter).filter(
+      (s) => !ignoredIds.has(s.id)
+    );
+  }
 
   return (
-    <div className="workspace">
+    <div className="workspace workspace-full">
       <div className="workspace-head">
         <div>
           <h2 className="workspace-title">Research sources</h2>
           <p className="workspace-sub">
             {sources.length} saved {sources.length === 1 ? "source" : "sources"}
+            {ignoredIds.size > 0 ? ` · ${ignoredIds.size} ignored` : ""}
           </p>
         </div>
         <button
@@ -93,47 +122,16 @@ export function ResearchGrid({
         </div>
       ) : null}
 
-      {filtered.length > 0 ? (
-        <div className="research-grid">
-          {filtered.map((source) => {
-            const strongestPhrase = source.useful_phrases[0];
-            return (
-              <button
-                key={source.id}
-                type="button"
-                className={`source-tile${selectedSourceId === source.id ? " is-active" : ""}`}
-                onClick={() => onSelectSource(source.id)}
-              >
-                <div className="source-tile-head">
-                  <h4 className="source-tile-title">
-                    {source.title || "Untitled source"}
-                  </h4>
-                  <span className="score-pill">{source.relevance_score}</span>
-                </div>
-                <div className="source-tile-meta">
-                  {source.platform ? (
-                    <span className="meta-chip">{source.platform}</span>
-                  ) : null}
-                  {source.emotional_theme ? (
-                    <span className="meta-chip meta-chip-theme">
-                      {source.emotional_theme}
-                    </span>
-                  ) : null}
-                </div>
-                {strongestPhrase ? (
-                  <p className="source-tile-quote">“{strongestPhrase}”</p>
-                ) : null}
-                {source.summary ? (
-                  <p className="source-tile-summary">{source.summary}</p>
-                ) : null}
-                {source.url ? (
-                  <span className="source-tile-link">
-                    <ExternalLink size={12} /> Source link
-                  </span>
-                ) : null}
-              </button>
-            );
-          })}
+      {visible.length > 0 ? (
+        <div className="research-card-grid">
+          {visible.map((source) => (
+            <ResearchSourceCard
+              key={source.id}
+              source={source}
+              tags={selection[source.id] ?? []}
+              onToggleTag={(tag) => toggleTag(source.id, tag)}
+            />
+          ))}
         </div>
       ) : sources.length > 0 ? (
         <div className="list-state">No sources match this filter.</div>

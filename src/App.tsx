@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import {
+  fetchAdCandidates,
   fetchLatestCustomerAvatar,
   fetchLatestInsight,
   fetchAdCopySets,
   fetchCreativePromptSets,
+  fetchDesireConceptSets,
   fetchMassDesires,
   fetchMarketingAngles,
   fetchLatestResearchSources,
@@ -12,6 +14,8 @@ import {
   isSupabaseConfigured,
 } from "./lib/supabase";
 import type {
+  AdCandidate,
+  AdCandidatePatch,
   AdCopySet,
   AngleReviewPatch,
   CreativePromptSet,
@@ -19,9 +23,15 @@ import type {
   GenerateAnglesResponse,
   GenerateAvatarResponse,
   GenerateCopyResponse,
+  UpdateCopyResponse,
+  RegenerateCopyResponse,
+  RegenerateMode,
+  AdVariation,
+  DesireConceptSet,
   GenerateCreativePromptsResponse,
   GenerateDesiresResponse,
   GenerateInsightResponse,
+  GenerateTofConceptsResponse,
   MarketingAngle,
   MassDesire,
   ProductProject,
@@ -30,13 +40,13 @@ import type {
   ResearchSource,
   RunResearchResponse,
   UpdateAngleReviewResponse,
+  UpsertAdCandidateResponse,
 } from "./types";
 import { AppShell } from "./components/AppShell";
-import type {
-  ModeStatus,
-  SelectedItem,
-  WorkflowMode,
-} from "./components/workflow";
+import { CopyPackModal } from "./components/CopyPackModal";
+import { TofConceptModal } from "./components/TofConceptModal";
+import { flattenFinalAds } from "./lib/finalAds";
+import type { ModeStatus, WorkflowMode } from "./components/workflow";
 
 const API_BASE = "http://localhost:3001";
 
@@ -117,10 +127,12 @@ function App() {
   const [isLoading, setIsLoading] = useState<boolean>(isSupabaseConfigured);
   const [isCreating, setIsCreating] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [deletingProjectId, setDeletingProjectId] = useState<string | null>(
+    null
+  );
 
   // Workflow-mode command-centre UI state.
   const [mode, setMode] = useState<WorkflowMode>("setup");
-  const [selectedItem, setSelectedItem] = useState<SelectedItem | null>(null);
 
   // Research results + status, keyed by project id.
   const [researchByProject, setResearchByProject] = useState<
@@ -172,6 +184,27 @@ function App() {
     string | null
   >(null);
   const [copyError, setCopyError] = useState<string | null>(null);
+  const [copyModal, setCopyModal] = useState<{
+    copySet: AdCopySet;
+    angleName: string;
+    massDesire: string;
+    offer: string;
+    product: string;
+  } | null>(null);
+
+  const [conceptSetsByProject, setConceptSetsByProject] = useState<
+    Record<string, DesireConceptSet[]>
+  >({});
+  const [generatingTofDesireId, setGeneratingTofDesireId] = useState<
+    string | null
+  >(null);
+  const [tofError, setTofError] = useState<string | null>(null);
+  const [tofModal, setTofModal] = useState<{
+    conceptSet: DesireConceptSet;
+    desireTitle: string;
+    offer: string;
+    product: string;
+  } | null>(null);
 
   const [creativePromptSetsByProject, setCreativePromptSetsByProject] =
     useState<Record<string, CreativePromptSet[]>>({});
@@ -183,6 +216,17 @@ function App() {
 
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [savingReviewAngleId, setSavingReviewAngleId] = useState<string | null>(
+    null
+  );
+
+  const [adCandidatesByProject, setAdCandidatesByProject] = useState<
+    Record<string, AdCandidate[]>
+  >({});
+  const [candidateError, setCandidateError] = useState<string | null>(null);
+  const [savingCandidateAngleId, setSavingCandidateAngleId] = useState<
+    string | null
+  >(null);
+  const [savingCandidateId, setSavingCandidateId] = useState<string | null>(
     null
   );
 
@@ -351,7 +395,9 @@ function App() {
       selectedId in desiresByProject &&
       selectedId in anglesByProject &&
       selectedId in copySetsByProject &&
-      selectedId in creativePromptSetsByProject
+      selectedId in creativePromptSetsByProject &&
+      selectedId in conceptSetsByProject &&
+      selectedId in adCandidatesByProject
     ) {
       return;
     }
@@ -363,22 +409,40 @@ function App() {
       setDesiresError(null);
       setAnglesError(null);
       setCopyError(null);
+      setTofError(null);
       setCreativePromptError(null);
+      setCandidateError(null);
       try {
-        const [desires, angles, copySets, creativePromptSets] =
-          await Promise.all([
-            fetchMassDesires(selectedId),
-            fetchMarketingAngles(selectedId),
-            fetchAdCopySets(selectedId),
-            fetchCreativePromptSets(selectedId),
-          ]);
+        const [
+          desires,
+          angles,
+          copySets,
+          conceptSets,
+          creativePromptSets,
+          adCandidates,
+        ] = await Promise.all([
+          fetchMassDesires(selectedId),
+          fetchMarketingAngles(selectedId),
+          fetchAdCopySets(selectedId),
+          fetchDesireConceptSets(selectedId),
+          fetchCreativePromptSets(selectedId),
+          fetchAdCandidates(selectedId),
+        ]);
         if (cancelled) return;
         setDesiresByProject((prev) => ({ ...prev, [selectedId]: desires }));
         setAnglesByProject((prev) => ({ ...prev, [selectedId]: angles }));
         setCopySetsByProject((prev) => ({ ...prev, [selectedId]: copySets }));
+        setConceptSetsByProject((prev) => ({
+          ...prev,
+          [selectedId]: conceptSets,
+        }));
         setCreativePromptSetsByProject((prev) => ({
           ...prev,
           [selectedId]: creativePromptSets,
+        }));
+        setAdCandidatesByProject((prev) => ({
+          ...prev,
+          [selectedId]: adCandidates,
         }));
       } catch (err: unknown) {
         if (cancelled) return;
@@ -406,7 +470,9 @@ function App() {
     desiresByProject,
     anglesByProject,
     copySetsByProject,
+    conceptSetsByProject,
     creativePromptSetsByProject,
+    adCandidatesByProject,
   ]);
 
   function updateField<K extends keyof ProductProjectInput>(
@@ -418,7 +484,6 @@ function App() {
 
   function handleSelectProject(id: string) {
     setSelectedId(id);
-    setSelectedItem(null);
   }
 
   async function handleCreateProject(event: React.FormEvent<HTMLFormElement>) {
@@ -434,7 +499,6 @@ function App() {
       };
       setProjects((prev) => [localProject, ...prev]);
       setSelectedId(localProject.id);
-      setSelectedItem(null);
       setForm(EMPTY_FORM);
       return;
     }
@@ -444,7 +508,6 @@ function App() {
       const saved = await insertProject(form);
       setProjects((prev) => [saved, ...prev]);
       setSelectedId(saved.id);
-      setSelectedItem(null);
       setForm(EMPTY_FORM);
     } catch (err: unknown) {
       setError(
@@ -454,6 +517,85 @@ function App() {
       );
     } finally {
       setIsCreating(false);
+    }
+  }
+
+  const DELETE_CONFIRM_MESSAGE =
+    "Are you sure you want to delete this project? This will permanently delete " +
+    "the project and all related research, insights, angles, copy, creative " +
+    "prompts, and ad selections. This cannot be undone.";
+
+  function forgetProjectData(projectId: string) {
+    const drop = <T,>(prev: Record<string, T>): Record<string, T> => {
+      if (!(projectId in prev)) return prev;
+      const next = { ...prev };
+      delete next[projectId];
+      return next;
+    };
+    setResearchByProject(drop);
+    setInsightByProject(drop);
+    setAvatarByProject(drop);
+    setDesiresByProject(drop);
+    setAnglesByProject(drop);
+    setCopySetsByProject(drop);
+    setCreativePromptSetsByProject(drop);
+    setAdCandidatesByProject(drop);
+  }
+
+  async function handleDeleteProject(projectId: string) {
+    if (!projectId) return;
+    if (!window.confirm(DELETE_CONFIRM_MESSAGE)) return;
+
+    setStatusMessage(null);
+    setError(null);
+    setDeletingProjectId(projectId);
+
+    const finishLocalCleanup = () => {
+      setProjects((prev) => {
+        const remaining = prev.filter((p) => p.id !== projectId);
+        setSelectedId((current) =>
+          current === projectId ? remaining[0]?.id ?? null : current
+        );
+        return remaining;
+      });
+      forgetProjectData(projectId);
+    };
+
+    // Local-only mode (no Supabase): just drop it from memory.
+    if (!isSupabaseConfigured) {
+      finishLocalCleanup();
+      setDeletingProjectId(null);
+      setStatusMessage("Project deleted.");
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${projectId}`, {
+        method: "DELETE",
+      });
+
+      const payload: unknown = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        const message =
+          payload && typeof payload === "object" && "error" in payload
+            ? String((payload as { error: unknown }).error)
+            : `Delete failed (HTTP ${res.status}).`;
+        throw new Error(message);
+      }
+
+      finishLocalCleanup();
+      setStatusMessage("Project deleted.");
+    } catch (err: unknown) {
+      setError(
+        err instanceof Error
+          ? `Failed to delete project: ${err.message}`
+          : "Failed to delete project."
+      );
+    } finally {
+      setDeletingProjectId((current) =>
+        current === projectId ? null : current
+      );
     }
   }
 
@@ -652,6 +794,79 @@ function App() {
     }
   }
 
+  function openCopyPack(copySet: AdCopySet, angleName: string) {
+    const project = projects.find((p) => p.id === copySet.project_id);
+    const desire = (desiresByProject[copySet.project_id] ?? []).find(
+      (d) => d.id === copySet.mass_desire_id
+    );
+    setCopyModal({
+      copySet,
+      angleName,
+      massDesire: desire?.desire_statement ?? "",
+      offer: project?.current_offer ?? "",
+      product: project?.our_product_name ?? "",
+    });
+  }
+
+  function openTofConcepts(conceptSet: DesireConceptSet) {
+    const project = projects.find((p) => p.id === conceptSet.project_id);
+    setTofModal({
+      conceptSet,
+      desireTitle: conceptSet.source_desire_title,
+      offer: project?.current_offer ?? "",
+      product: project?.our_product_name ?? "",
+    });
+  }
+
+  async function handleGenerateTofConcepts(
+    projectId: string,
+    massDesireId: string
+  ) {
+    setStatusMessage(null);
+    setTofError(null);
+    setGeneratingTofDesireId(massDesireId);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/tof-concepts/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId, massDesireId }),
+      });
+
+      const payload: unknown = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        const message =
+          payload && typeof payload === "object" && "error" in payload
+            ? String((payload as { error: unknown }).error)
+            : `TOF concept generation failed (HTTP ${res.status}).`;
+        throw new Error(message);
+      }
+
+      const data = payload as GenerateTofConceptsResponse;
+      setConceptSetsByProject((prev) => {
+        const existing = prev[projectId] ?? [];
+        const filtered = existing.filter(
+          (set) => set.mass_desire_id !== massDesireId
+        );
+        return {
+          ...prev,
+          [projectId]: [data.conceptSet, ...filtered],
+        };
+      });
+      openTofConcepts(data.conceptSet);
+      setStatusMessage("Top of funnel concepts generated.");
+    } catch (err: unknown) {
+      setTofError(
+        err instanceof Error ? err.message : "TOF concept generation failed."
+      );
+    } finally {
+      setGeneratingTofDesireId((current) =>
+        current === massDesireId ? null : current
+      );
+    }
+  }
+
   async function handleGenerateCopy(
     projectId: string,
     marketingAngleId: string
@@ -695,7 +910,14 @@ function App() {
         );
         return { ...prev, [projectId]: filtered };
       });
-      setStatusMessage("Quick copy generated.");
+      const generatedAngle = (anglesByProject[projectId] ?? []).find(
+        (a) => a.id === marketingAngleId
+      );
+      openCopyPack(
+        data.copySet,
+        generatedAngle?.angle_name ?? "Marketing angle"
+      );
+      setStatusMessage("Copy pack generated.");
     } catch (err: unknown) {
       setCopyError(err instanceof Error ? err.message : "Ad copy failed.");
     } finally {
@@ -703,6 +925,83 @@ function App() {
         current === marketingAngleId ? null : current
       );
     }
+  }
+
+  async function handleSaveCopyPack(
+    copySet: AdCopySet,
+    adVariations: AdVariation[]
+  ): Promise<AdCopySet> {
+    const res = await fetch(`${API_BASE}/api/copy/${copySet.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ad_variations: adVariations }),
+    });
+
+    const payload: unknown = await res.json().catch(() => null);
+
+    if (!res.ok) {
+      const message =
+        payload && typeof payload === "object" && "error" in payload
+          ? String((payload as { error: unknown }).error)
+          : `Failed to save copy pack (HTTP ${res.status}).`;
+      throw new Error(message);
+    }
+
+    const updated = (payload as UpdateCopyResponse).copySet;
+
+    setCopySetsByProject((prev) => {
+      const existing = prev[updated.project_id] ?? [];
+      const next = existing.map((set) =>
+        set.id === updated.id ? updated : set
+      );
+      return { ...prev, [updated.project_id]: next };
+    });
+    setCopyModal((current) =>
+      current && current.copySet.id === updated.id
+        ? { ...current, copySet: updated }
+        : current
+    );
+
+    return updated;
+  }
+
+  async function handleRegenerateAd(
+    copySet: AdCopySet,
+    adIndex: number,
+    mode: RegenerateMode
+  ): Promise<AdCopySet> {
+    const res = await fetch(`${API_BASE}/api/copy/${copySet.id}/regenerate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ad_index: adIndex, mode }),
+    });
+
+    const payload: unknown = await res.json().catch(() => null);
+
+    if (!res.ok) {
+      const message =
+        payload && typeof payload === "object" && "error" in payload
+          ? String((payload as { error: unknown }).error)
+          : `Failed to regenerate (HTTP ${res.status}).`;
+      throw new Error(message);
+    }
+
+    const updated = (payload as RegenerateCopyResponse).copySet;
+
+    setCopySetsByProject((prev) => {
+      const existing = prev[updated.project_id] ?? [];
+      const next = existing.map((set) =>
+        set.id === updated.id ? updated : set
+      );
+      return { ...prev, [updated.project_id]: next };
+    });
+    setCopyModal((current) =>
+      current && current.copySet.id === updated.id
+        ? { ...current, copySet: updated }
+        : current
+    );
+
+    return updated;
   }
 
   async function handleGenerateCreativePrompts(
@@ -797,6 +1096,95 @@ function App() {
     }
   }
 
+  function applyCandidate(projectId: string, candidate: AdCandidate) {
+    setAdCandidatesByProject((prev) => {
+      const existing = prev[projectId] ?? [];
+      const index = existing.findIndex((c) => c.id === candidate.id);
+      const next =
+        index === -1
+          ? [...existing, candidate]
+          : existing.map((c) => (c.id === candidate.id ? candidate : c));
+      next.sort((a, b) => (a.ad_number ?? 0) - (b.ad_number ?? 0));
+      return { ...prev, [projectId]: next };
+    });
+  }
+
+  async function handleUpsertCandidate(
+    projectId: string,
+    marketingAngleId: string,
+    patch: AdCandidatePatch
+  ) {
+    setCandidateError(null);
+    setSavingCandidateAngleId(marketingAngleId);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/ad-candidates/upsert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId, marketingAngleId, ...patch }),
+      });
+
+      const payload: unknown = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        const message =
+          payload && typeof payload === "object" && "error" in payload
+            ? String((payload as { error: unknown }).error)
+            : `Ad candidate save failed (HTTP ${res.status}).`;
+        throw new Error(message);
+      }
+
+      const data = payload as UpsertAdCandidateResponse;
+      applyCandidate(projectId, data.candidate);
+    } catch (err: unknown) {
+      setCandidateError(
+        err instanceof Error ? err.message : "Ad candidate save failed."
+      );
+    } finally {
+      setSavingCandidateAngleId((current) =>
+        current === marketingAngleId ? null : current
+      );
+    }
+  }
+
+  async function handlePatchCandidate(
+    projectId: string,
+    candidateId: string,
+    patch: AdCandidatePatch
+  ) {
+    setCandidateError(null);
+    setSavingCandidateId(candidateId);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/ad-candidates/${candidateId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+
+      const payload: unknown = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        const message =
+          payload && typeof payload === "object" && "error" in payload
+            ? String((payload as { error: unknown }).error)
+            : `Ad candidate update failed (HTTP ${res.status}).`;
+        throw new Error(message);
+      }
+
+      const data = payload as UpsertAdCandidateResponse;
+      applyCandidate(projectId, data.candidate);
+    } catch (err: unknown) {
+      setCandidateError(
+        err instanceof Error ? err.message : "Ad candidate update failed."
+      );
+    } finally {
+      setSavingCandidateId((current) =>
+        current === candidateId ? null : current
+      );
+    }
+  }
+
   // Derived per-project data for the selected project.
   const sources = selectedId ? researchByProject[selectedId] ?? [] : [];
   const insight = selectedId ? insightByProject[selectedId] ?? null : null;
@@ -804,42 +1192,47 @@ function App() {
   const desires = selectedId ? desiresByProject[selectedId] ?? [] : [];
   const angles = selectedId ? anglesByProject[selectedId] ?? [] : [];
   const copySets = selectedId ? copySetsByProject[selectedId] ?? [] : [];
+  const conceptSets = selectedId
+    ? conceptSetsByProject[selectedId] ?? []
+    : [];
   const creativePromptSets = selectedId
     ? creativePromptSetsByProject[selectedId] ?? []
     : [];
+  const adCandidates = selectedId
+    ? adCandidatesByProject[selectedId] ?? []
+    : [];
+
+  const finalAdCount = flattenFinalAds(desires, angles, copySets).length;
 
   const statuses: Record<WorkflowMode, ModeStatus> = {
     setup: selectedProject ? "done" : "missing",
     research: sources.length > 0 ? "done" : "missing",
-    insights: insight ? "done" : sources.length > 0 ? "ready" : "missing",
+    insight_report: insight
+      ? "done"
+      : sources.length > 0
+        ? "ready"
+        : "missing",
+    avatar: avatar ? "done" : insight ? "ready" : "missing",
     strategy:
       desires.length > 0 && angles.length > 0
         ? "done"
         : insight
           ? "ready"
           : "missing",
-    creative:
-      copySets.length > 0 || creativePromptSets.length > 0
-        ? "done"
-        : angles.length > 0
-          ? "ready"
-          : "missing",
-    review: angles.some(
-      (a) => a.is_shortlisted || a.review_status !== "untested"
-    )
-      ? "done"
-      : angles.length > 0
-        ? "ready"
-        : "missing",
+    ads: finalAdCount > 0 ? "done" : copySets.length > 0 ? "ready" : "missing",
+    additional:
+      copySets.length > 0 || creativePromptSets.length > 0 ? "ready" : "missing",
   };
 
-  return (
+  const shell = (
     <AppShell
       projects={projects}
       selectedId={selectedId}
       selectedProject={selectedProject}
       isProjectsLoading={isLoading}
       onSelectProject={handleSelectProject}
+      deletingProjectId={deletingProjectId}
+      onDeleteProject={(id) => void handleDeleteProject(id)}
       form={form}
       onUpdateField={updateField}
       onCreateProject={handleCreateProject}
@@ -848,8 +1241,6 @@ function App() {
       mode={mode}
       onChangeMode={setMode}
       statuses={statuses}
-      selectedItem={selectedItem}
-      onSelectItem={setSelectedItem}
       statusMessage={statusMessage}
       sources={sources}
       insight={insight}
@@ -857,7 +1248,9 @@ function App() {
       desires={desires}
       angles={angles}
       copySets={copySets}
+      conceptSets={conceptSets}
       creativePromptSets={creativePromptSets}
+      adCandidates={adCandidates}
       isResearching={researchingId === selectedId}
       isSourcesLoading={sourcesLoadingId === selectedId}
       researchError={researchError}
@@ -874,10 +1267,15 @@ function App() {
       anglesError={anglesError}
       generatingCopyAngleId={generatingCopyAngleId}
       copyError={copyError}
+      generatingTofDesireId={generatingTofDesireId}
+      tofError={tofError}
       generatingCreativePromptAngleId={generatingCreativePromptAngleId}
       creativePromptError={creativePromptError}
       savingReviewAngleId={savingReviewAngleId}
       reviewError={reviewError}
+      candidateError={candidateError}
+      savingCandidateAngleId={savingCandidateAngleId}
+      savingCandidateId={savingCandidateId}
       onRunResearch={() => {
         if (selectedProject) void handleRunResearch(selectedProject.id);
       }}
@@ -897,6 +1295,11 @@ function App() {
         if (selectedProject)
           void handleGenerateCopy(selectedProject.id, angleId);
       }}
+      onGenerateTofConcepts={(desireId) => {
+        if (selectedProject)
+          void handleGenerateTofConcepts(selectedProject.id, desireId);
+      }}
+      onOpenTofConcepts={openTofConcepts}
       onGenerateCreativePrompts={(angleId, adCopySetId) => {
         if (selectedProject)
           void handleGenerateCreativePrompts(
@@ -909,7 +1312,49 @@ function App() {
         if (selectedProject)
           void handleUpdateAngleReview(selectedProject.id, angleId, updates);
       }}
+      onUpsertCandidate={(angleId, patch) => {
+        if (selectedProject)
+          void handleUpsertCandidate(selectedProject.id, angleId, patch);
+      }}
+      onPatchCandidate={(id, patch) => {
+        if (selectedProject)
+          void handlePatchCandidate(selectedProject.id, id, patch);
+      }}
+      onOpenCopyPack={(copySet, angleName) =>
+        openCopyPack(copySet, angleName)
+      }
     />
+  );
+
+  return (
+    <>
+      {shell}
+      {copyModal ? (
+        <CopyPackModal
+          key={copyModal.copySet.id}
+          copySet={copyModal.copySet}
+          angleName={copyModal.angleName}
+          desires={desires}
+          angles={angles}
+          massDesire={copyModal.massDesire}
+          offer={copyModal.offer}
+          product={copyModal.product}
+          onSave={handleSaveCopyPack}
+          onRegenerate={handleRegenerateAd}
+          onClose={() => setCopyModal(null)}
+        />
+      ) : null}
+      {tofModal ? (
+        <TofConceptModal
+          key={tofModal.conceptSet.id}
+          conceptSet={tofModal.conceptSet}
+          desireTitle={tofModal.desireTitle}
+          offer={tofModal.offer}
+          product={tofModal.product}
+          onClose={() => setTofModal(null)}
+        />
+      ) : null}
+    </>
   );
 }
 

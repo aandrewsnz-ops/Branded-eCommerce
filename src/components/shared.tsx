@@ -21,9 +21,25 @@ import {
 interface CopyButtonProps {
   text: string;
   label?: string;
+  /** Accent style for field-level copy buttons in the Copy Pack modal. */
+  variant?: "default" | "primary" | "headline" | "description";
 }
 
-export function CopyButton({ text, label = "Copy" }: CopyButtonProps) {
+const COPY_BUTTON_VARIANT_CLASS: Record<
+  NonNullable<CopyButtonProps["variant"]>,
+  string
+> = {
+  default: "btn-copy",
+  primary: "btn-copy btn-copy-field btn-copy-primary",
+  headline: "btn-copy btn-copy-field btn-copy-headline",
+  description: "btn-copy btn-copy-field btn-copy-description",
+};
+
+export function CopyButton({
+  text,
+  label = "Copy",
+  variant = "default",
+}: CopyButtonProps) {
   const [copied, setCopied] = useState(false);
 
   async function handleCopy() {
@@ -40,7 +56,7 @@ export function CopyButton({ text, label = "Copy" }: CopyButtonProps) {
   return (
     <button
       type="button"
-      className="btn-copy"
+      className={COPY_BUTTON_VARIANT_CLASS[variant]}
       onClick={() => void handleCopy()}
       disabled={!text.trim()}
     >
