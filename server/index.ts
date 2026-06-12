@@ -25,6 +25,11 @@ import {
   EXPECTED_ANGLES_PER_DESIRE,
 } from "./angles";
 import { generateAdCopy, regenerateAd, regenerateImagePrompt } from "./copy";
+import {
+  buildNamedAdImageStoragePath,
+  getAdImagePublicUrl,
+  renameAdImageObject,
+} from "./ad-image-storage";
 import { generateCreativePrompts } from "./creative-prompts";
 import { generateTofConcepts } from "./tof-concepts";
 import { normalizeProject } from "../src/types";
@@ -1177,6 +1182,144 @@ app.patch("/api/copy/:copySetId", async (req, res) => {
   if (updateError || !updated) {
     return res.status(500).json({
       error: `Failed to update ad copy set: ${updateError?.message ?? "unknown error"}`,
+    });
+  }
+
+  return res.json({ copySet: updated as AdCopySet });
+});
+
+app.post("/api/copy/:copySetId/fix-image-filename", async (req, res) => {
+  const copySetId = req.params.copySetId;
+
+  if (typeof copySetId !== "string" || copySetId.trim().length === 0) {
+    return res.status(400).json({ error: "Missing or invalid copy set id." });
+  }
+
+  const body = req.body as {
+    adIndex?: unknown;
+    safeFilename?: unknown;
+  };
+  const adIndex = body.adIndex;
+  const safeFilename = body.safeFilename;
+
+  if (typeof adIndex !== "number" || !Number.isInteger(adIndex) || adIndex < 0 || adIndex > 4) {
+    return res.status(400).json({
+      error: "'adIndex' must be an integer from 0 to 4.",
+    });
+  }
+
+  if (typeof safeFilename !== "string" || safeFilename.trim().length === 0) {
+    return res.status(400).json({
+      error: "Missing or invalid 'safeFilename'.",
+    });
+  }
+
+  const cleanFilename = safeFilename.trim().replace(/^.*[/\\]/, "");
+  if (!/^[a-z0-9][a-z0-9.-]*\.(png|jpe?g|webp)$/i.test(cleanFilename)) {
+    return res.status(400).json({
+      error: "Invalid safeFilename format.",
+    });
+  }
+
+  let supabase: ReturnType<typeof getSupabase>;
+  try {
+    supabase = getSupabase();
+  } catch (error: unknown) {
+    return res.status(500).json({ error: errorMessage(error) });
+  }
+
+  const { data: copySetRow, error: loadError } = await supabase
+    .from("ad_copy_sets")
+    .select("*")
+    .eq("id", copySetId)
+    .single();
+
+  if (loadError || !copySetRow) {
+    return res.status(404).json({
+      error: `Ad copy set not found: ${loadError?.message ?? copySetId}`,
+    });
+  }
+
+  const copySet = copySetRow as AdCopySet;
+  const adVariations = readStoredAdVariations(copySet);
+  const ad = adVariations[adIndex];
+
+  if (!ad?.image_path?.trim() || !ad.image_url?.trim()) {
+    return res.status(400).json({
+      error: "This ad does not have an uploaded image to rename.",
+    });
+  }
+
+  const oldPath = ad.image_path.trim();
+  let newPath = buildNamedAdImageStoragePath(copySet.project_id, cleanFilename);
+
+  if (oldPath === newPath) {
+    const basename = newPath.split("/").pop() ?? cleanFilename;
+    adVariations[adIndex] = {
+      ...ad,
+      image_filename: basename,
+    };
+    const { data: updatedSame, error: updateSameError } = await supabase
+      .from("ad_copy_sets")
+      .update(buildCopySetUpdate(adVariations))
+      .eq("id", copySetId)
+      .select()
+      .single();
+
+    if (updateSameError || !updatedSame) {
+      return res.status(500).json({
+        error: `Failed to update ad copy set: ${updateSameError?.message ?? "unknown error"}`,
+      });
+    }
+
+    return res.json({ copySet: updatedSame as AdCopySet });
+  }
+
+  try {
+    await renameAdImageObject(oldPath, newPath);
+  } catch (firstError: unknown) {
+    const message = errorMessage(firstError);
+    if (/already exists|duplicate|exists/i.test(message)) {
+      newPath = buildNamedAdImageStoragePath(
+        copySet.project_id,
+        cleanFilename,
+        true
+      );
+      try {
+        await renameAdImageObject(oldPath, newPath);
+      } catch (retryError: unknown) {
+        return res.status(502).json({
+          error:
+            "Could not update filename. The image is still available.",
+          detail: errorMessage(retryError),
+        });
+      }
+    } else {
+      return res.status(502).json({
+        error: "Could not update filename. The image is still available.",
+        detail: message,
+      });
+    }
+  }
+
+  const newBasename = newPath.split("/").pop() ?? cleanFilename;
+  adVariations[adIndex] = {
+    ...ad,
+    image_path: newPath,
+    image_url: getAdImagePublicUrl(newPath),
+    image_filename: newBasename,
+  };
+
+  const { data: updated, error: updateError } = await supabase
+    .from("ad_copy_sets")
+    .update(buildCopySetUpdate(adVariations))
+    .eq("id", copySetId)
+    .select()
+    .single();
+
+  if (updateError || !updated) {
+    return res.status(500).json({
+      error: `Renamed file but failed to save metadata: ${updateError?.message ?? "unknown error"}`,
     });
   }
 

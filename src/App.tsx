@@ -23,6 +23,7 @@ import type {
   GenerateAnglesResponse,
   GenerateAvatarResponse,
   GenerateCopyResponse,
+  FixImageFilenameResponse,
   UpdateCopyResponse,
   RegenerateCopyResponse,
   RegenerateMode,
@@ -965,6 +966,45 @@ function App() {
     return updated;
   }
 
+  async function handleFixImageFilename(
+    copySetId: string,
+    adIndex: number,
+    safeFilename: string
+  ): Promise<AdCopySet> {
+    const res = await fetch(`${API_BASE}/api/copy/${copySetId}/fix-image-filename`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ adIndex, safeFilename }),
+    });
+
+    const payload: unknown = await res.json().catch(() => null);
+
+    if (!res.ok) {
+      const message =
+        payload && typeof payload === "object" && "error" in payload
+          ? String((payload as { error: unknown }).error)
+          : "Could not update filename. The image is still available.";
+      throw new Error(message);
+    }
+
+    const updated = (payload as FixImageFilenameResponse).copySet;
+
+    setCopySetsByProject((prev) => {
+      const existing = prev[updated.project_id] ?? [];
+      const next = existing.map((set) =>
+        set.id === updated.id ? updated : set
+      );
+      return { ...prev, [updated.project_id]: next };
+    });
+    setCopyModal((current) =>
+      current && current.copySet.id === updated.id
+        ? { ...current, copySet: updated }
+        : current
+    );
+
+    return updated;
+  }
+
   async function handleRegenerateAd(
     copySet: AdCopySet,
     adIndex: number,
@@ -1323,6 +1363,7 @@ function App() {
       onOpenCopyPack={(copySet, angleName) =>
         openCopyPack(copySet, angleName)
       }
+      onFixImageFilename={handleFixImageFilename}
     />
   );
 

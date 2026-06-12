@@ -19,6 +19,8 @@ export interface FinalAd {
   description: string;
   image_url: string;
   image_path?: string;
+  image_filename?: string;
+  needs_filename_fix: boolean;
   copy_set_id: string;
   marketing_angle_id: string;
   mass_desire_id: string;
@@ -61,21 +63,81 @@ export function buildAdName(
   return `${massDesireNumber}${angleLetter} - ${description}`;
 }
 
+/** Build the display ad name from a flattened final ad record. */
+export function buildAdNameFromFinalAd(
+  finalAd: Pick<FinalAd, "ad_name">
+): string {
+  return finalAd.ad_name.trim();
+}
+
+/**
+ * Convert an ad display name to a safe storage/download filename.
+ * Example: "1A - Feel polished from face to chest" → "1a-feel-polished-from-face-to-chest.png"
+ */
 export function slugifyAdNameForFilename(
-  massDesireNumber: number,
-  angleLetter: string,
-  description: string,
+  adName: string,
   extension = "png"
 ): string {
-  const prefix = `${massDesireNumber}${angleLetter.toLowerCase()}`;
-  const slug = description
+  const ext = extension.replace(/^\./, "").toLowerCase() || "png";
+  const slug = adName
     .toLowerCase()
     .replace(/['']/g, "")
     .replace(/[^a-z0-9]+/g, "-")
+    .replace(/-+/g, "-")
     .replace(/^-+|-+$/g, "")
-    .slice(0, 80);
-  const ext = extension.replace(/^\./, "").toLowerCase() || "png";
-  return slug ? `${prefix}-${slug}.${ext}` : `${prefix}.${ext}`;
+    .slice(0, 100);
+  return slug ? `${slug}.${ext}` : `ad.${ext}`;
+}
+
+/** Basename from a stored image path or filename. */
+export function storedImageBasename(
+  imageFilename?: string,
+  imagePath?: string
+): string {
+  if (imageFilename?.trim()) return imageFilename.trim();
+  if (imagePath?.trim()) {
+    return imagePath.split("/").pop() ?? "";
+  }
+  return "";
+}
+
+/** True when the stored object name does not match the expected clean filename. */
+export function imageFilenameNeedsFix(
+  expectedSafeFilename: string,
+  imageFilename?: string,
+  imagePath?: string
+): boolean {
+  const expected = expectedSafeFilename.trim().toLowerCase();
+  const stored = storedImageBasename(imageFilename, imagePath).toLowerCase();
+  if (!stored) return true;
+  if (stored === expected) return false;
+  if (/^ad-\d+-/i.test(stored)) return true;
+  if (imagePath?.includes("/copy-packs/") || imagePath?.includes("/angles/")) {
+    return true;
+  }
+  return stored !== expected;
+}
+
+/** Build the expected safe filename for one ad variation. */
+export function buildSafeFilenameForAd(
+  massDesireNumber: number,
+  angleLetter: string,
+  ad: Pick<AdVariation, "headline">,
+  angleName: string,
+  adVariationIndex: number,
+  extension: string
+): string {
+  const adName = buildAdName(
+    massDesireNumber,
+    angleLetter,
+    buildAdDescription(ad, angleName)
+  );
+  let safeFilename = slugifyAdNameForFilename(adName, extension);
+  if (adVariationIndex > 0) {
+    const base = safeFilename.replace(/\.[^.]+$/, "");
+    safeFilename = `${base}-ad-${adVariationIndex + 1}.${extension}`;
+  }
+  return safeFilename;
 }
 
 export function extensionFromVariation(ad: Partial<AdVariation>): string {
@@ -133,12 +195,7 @@ export function resolveAdNaming(
   const description = buildAdDescription(ad, angleName);
   const adName = buildAdName(massDesireNumber, angleLetter, description);
   const ext = extensionFromVariation(ad as AdVariation);
-  let safeFilename = slugifyAdNameForFilename(
-    massDesireNumber,
-    angleLetter,
-    description,
-    ext
-  );
+  let safeFilename = slugifyAdNameForFilename(adName, ext);
 
   // If multiple variations share one angle, keep filenames unique.
   if (adVariationIndex > 0) {
@@ -186,22 +243,19 @@ export function flattenFinalAds(
         const description = buildAdDescription(ad, angle.angle_name);
         const adName = buildAdName(massDesireNumber, angleLetter, description);
         const ext = extensionFromVariation(ad);
-        let safeFilename =
-          ad.image_filename?.trim() &&
-          !ad.image_filename.startsWith("ad-") &&
-          ad.image_filename.includes(".")
-            ? ad.image_filename
-            : slugifyAdNameForFilename(
-                massDesireNumber,
-                angleLetter,
-                description,
-                ext
-              );
-
-        if (adVariationIndex > 0 && !safeFilename.includes(`-ad-${adVariationIndex + 1}`)) {
-          const base = safeFilename.replace(/\.[^.]+$/, "");
-          safeFilename = `${base}-ad-${adVariationIndex + 1}.${ext}`;
-        }
+        const safeFilename = buildSafeFilenameForAd(
+          massDesireNumber,
+          angleLetter,
+          ad,
+          angle.angle_name,
+          adVariationIndex,
+          ext
+        );
+        const needsFix = imageFilenameNeedsFix(
+          safeFilename,
+          ad.image_filename,
+          ad.image_path
+        );
 
         finalAds.push({
           ad_name: adName,
@@ -214,6 +268,8 @@ export function flattenFinalAds(
           description: ad.description ?? "",
           image_url: ad.image_url,
           image_path: ad.image_path,
+          image_filename: ad.image_filename,
+          needs_filename_fix: needsFix,
           copy_set_id: copySet.id,
           marketing_angle_id: angle.id,
           mass_desire_id: desire.id,

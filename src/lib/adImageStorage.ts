@@ -114,7 +114,7 @@ export async function uploadAdImage(
 
   const extension = extensionForFile(file);
   const filename =
-    safeFilename.trim() ||
+    safeFilename.trim().replace(/^.*[/\\]/, "") ||
     `upload-${Date.now()}.${extension}`;
 
   let path = buildNamedAdImageStoragePath(projectId, filename);
@@ -144,7 +144,7 @@ export async function uploadAdImage(
   return {
     image_url: getAdImagePublicUrl(path),
     image_path: path,
-    image_filename: filename.split("/").pop() ?? filename,
+    image_filename: path.split("/").pop() ?? filename,
     image_uploaded_at: new Date().toISOString(),
     image_file_type:
       file.type || `image/${extension === "jpg" ? "jpeg" : extension}`,

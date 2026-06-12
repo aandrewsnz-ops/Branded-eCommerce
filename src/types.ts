@@ -528,6 +528,10 @@ export interface UpdateCopyResponse {
   copySet: AdCopySet;
 }
 
+export interface FixImageFilenameResponse {
+  copySet: AdCopySet;
+}
+
 export interface RegenerateCopyResponse {
   copySet: AdCopySet;
 }

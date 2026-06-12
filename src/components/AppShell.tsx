@@ -101,6 +101,11 @@ export interface AppShellProps {
   onUpsertCandidate: (angleId: string, patch: AdCandidatePatch) => void;
   onPatchCandidate: (id: string, patch: AdCandidatePatch) => void;
   onOpenCopyPack: (copySet: AdCopySet, angleName: string) => void;
+  onFixImageFilename: (
+    copySetId: string,
+    adIndex: number,
+    safeFilename: string
+  ) => Promise<AdCopySet>;
 }
 
 export function AppShell(props: AppShellProps) {
@@ -188,6 +193,7 @@ export function AppShell(props: AppShellProps) {
             angles={props.angles}
             copySets={props.copySets}
             onGoToStrategy={() => props.onChangeMode("strategy")}
+            onFixImageFilename={props.onFixImageFilename}
           />
         );
       case "additional":

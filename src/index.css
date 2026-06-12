@@ -4618,6 +4618,34 @@ p {
   width: 100%;
 }
 
+.ads-image-link {
+  display: block;
+  width: 100%;
+  line-height: 0;
+}
+
+.ads-image-link:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+  border-radius: 12px;
+}
+
+.ads-filename-note {
+  margin: 0;
+  font-size: 0.72rem;
+  color: var(--text-faint);
+  text-align: center;
+}
+
+.ads-fix-btn {
+  opacity: 0.75;
+  font-size: 0.75rem;
+}
+
+.ads-fix-btn:hover:not(:disabled) {
+  opacity: 1;
+}
+
 .ads-download-btn {
   opacity: 0.65;
   font-size: 0.75rem;

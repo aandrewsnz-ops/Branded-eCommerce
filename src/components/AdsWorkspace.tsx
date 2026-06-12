@@ -9,6 +9,11 @@ interface AdsWorkspaceProps {
   angles: MarketingAngle[];
   copySets: AdCopySet[];
   onGoToStrategy: () => void;
+  onFixImageFilename: (
+    copySetId: string,
+    adIndex: number,
+    safeFilename: string
+  ) => Promise<AdCopySet>;
 }
 
 export function AdsWorkspace({
@@ -16,25 +21,48 @@ export function AdsWorkspace({
   angles,
   copySets,
   onGoToStrategy,
+  onFixImageFilename,
 }: AdsWorkspaceProps) {
   const finalAds = useMemo(
     () => flattenFinalAds(desires, angles, copySets),
     [desires, angles, copySets]
   );
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
-  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [fixingId, setFixingId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   async function handleDownload(adKey: string, imageUrl: string, filename: string) {
     setDownloadingId(adKey);
-    setDownloadError(null);
+    setActionError(null);
     try {
       await downloadImageAs(imageUrl, filename);
     } catch (err: unknown) {
-      setDownloadError(
+      setActionError(
         err instanceof Error ? err.message : "Download failed."
       );
     } finally {
       setDownloadingId(null);
+    }
+  }
+
+  async function handleFixFilename(
+    adKey: string,
+    copySetId: string,
+    adIndex: number,
+    safeFilename: string
+  ) {
+    setFixingId(adKey);
+    setActionError(null);
+    try {
+      await onFixImageFilename(copySetId, adIndex, safeFilename);
+    } catch (err: unknown) {
+      setActionError(
+        err instanceof Error
+          ? err.message
+          : "Could not update filename. The image is still available."
+      );
+    } finally {
+      setFixingId(null);
     }
   }
 
@@ -50,9 +78,9 @@ export function AdsWorkspace({
         </div>
       </div>
 
-      {downloadError ? (
+      {actionError ? (
         <div className="banner banner-error" role="alert">
-          {downloadError}
+          {actionError}
         </div>
       ) : null}
 
@@ -72,6 +100,7 @@ export function AdsWorkspace({
         <div className="ads-list">
           {finalAds.map((ad) => {
             const adKey = `${ad.copy_set_id}-${ad.ad_variation_index}`;
+            const busy = downloadingId === adKey || fixingId === adKey;
             return (
               <article key={adKey} className="ads-card">
                 <div className="ads-card-copy">
@@ -109,16 +138,46 @@ export function AdsWorkspace({
                   </div>
                 </div>
                 <div className="ads-card-image">
-                  <img
-                    src={ad.image_url}
-                    alt={ad.ad_name}
-                    className="ads-image-preview"
-                  />
+                  <a
+                    href={ad.image_url}
+                    download={ad.safe_filename}
+                    className="ads-image-link"
+                    title={ad.ad_name}
+                  >
+                    <img
+                      src={ad.image_url}
+                      alt={ad.ad_name}
+                      className="ads-image-preview"
+                    />
+                  </a>
+                  {ad.needs_filename_fix ? (
+                    <p className="ads-filename-note">Filename needs updating</p>
+                  ) : null}
                   <div className="ads-image-actions">
+                    {ad.needs_filename_fix ? (
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm ads-fix-btn"
+                        disabled={busy}
+                        onClick={() =>
+                          void handleFixFilename(
+                            adKey,
+                            ad.copy_set_id,
+                            ad.ad_variation_index,
+                            ad.safe_filename
+                          )
+                        }
+                      >
+                        {fixingId === adKey ? (
+                          <Loader2 size={13} className="spin" />
+                        ) : null}
+                        Fix Filename
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       className="btn btn-secondary btn-sm ads-download-btn"
-                      disabled={downloadingId === adKey}
+                      disabled={busy}
                       onClick={() =>
                         void handleDownload(adKey, ad.image_url, ad.safe_filename)
                       }
