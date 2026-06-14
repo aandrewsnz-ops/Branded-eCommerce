@@ -9,6 +9,8 @@ import {
 } from "lucide-react";
 import type { ModeStatus, WorkflowMode } from "./workflow";
 import { WORKFLOW_MODES } from "./workflow";
+import type { ProjectAiUsageSummary } from "../types";
+import { formatAiCost, workflowSectionCostUsd } from "../lib/aiUsageFormat";
 
 const MODE_ICONS: Record<WorkflowMode, typeof Search> = {
   setup: Settings2,
@@ -30,12 +32,14 @@ interface WorkflowNavProps {
   activeMode: WorkflowMode;
   statuses: Record<WorkflowMode, ModeStatus>;
   onChange: (mode: WorkflowMode) => void;
+  projectAiUsage: ProjectAiUsageSummary | null;
 }
 
 export function WorkflowNav({
   activeMode,
   statuses,
   onChange,
+  projectAiUsage,
 }: WorkflowNavProps) {
   return (
     <nav className="workflow-nav" aria-label="Workflow modes">
@@ -43,6 +47,9 @@ export function WorkflowNav({
         const Icon = MODE_ICONS[mode.id];
         const status = statuses[mode.id];
         const isActive = activeMode === mode.id;
+        const costLabel = formatAiCost(
+          workflowSectionCostUsd(projectAiUsage, mode.id)
+        );
         return (
           <button
             key={mode.id}
@@ -56,6 +63,9 @@ export function WorkflowNav({
             <span className={`workflow-nav-status status-${status}`}>
               {STATUS_LABELS[status]}
             </span>
+            {costLabel ? (
+              <span className="workflow-nav-cost">{costLabel}</span>
+            ) : null}
           </button>
         );
       })}

@@ -42,14 +42,29 @@ import type {
   RunResearchResponse,
   UpdateAngleReviewResponse,
   UpsertAdCandidateResponse,
+  ProjectAiCostTotal,
+  ProjectAiCostTotalsResponse,
+  ProjectAiUsageSummary,
+  AiUsageSummary,
 } from "./types";
 import { AppShell } from "./components/AppShell";
 import { CopyPackModal } from "./components/CopyPackModal";
 import { TofConceptModal } from "./components/TofConceptModal";
+import {
+  AiProgressOverlay,
+  type AiOverlayStatus,
+} from "./components/AiProgressOverlay";
 import { flattenFinalAds } from "./lib/finalAds";
+import type { AiOperation } from "./lib/aiProgress";
+import { parseAiUsage } from "./lib/aiUsageFormat";
+import {
+  copyErrorBannerMessage,
+  copyErrorOverlayDetails,
+  parseCopyGenerateError,
+  type CopyFailureStage,
+} from "./lib/copyGenerateErrors";
+import { API_BASE, apiPostJson } from "./lib/api";
 import type { ModeStatus, WorkflowMode } from "./components/workflow";
-
-const API_BASE = "http://localhost:3001";
 
 const EMPTY_FORM: ProductProjectInput = {
   our_product_name: "",
@@ -115,6 +130,16 @@ function createId(): string {
   }
   return `project-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
+
+type AiOverlaySession = {
+  operation: AiOperation;
+  status: AiOverlayStatus;
+  startedAt: number;
+  sessionKey: string;
+  usage: AiUsageSummary | null;
+  errorStage?: CopyFailureStage | null;
+  errorDetails?: string | null;
+};
 
 function App() {
   const [projects, setProjects] = useState<ProductProject[]>(
@@ -184,6 +209,13 @@ function App() {
   const [generatingCopyAngleId, setGeneratingCopyAngleId] = useState<
     string | null
   >(null);
+  const [aiOverlaySession, setAiOverlaySession] =
+    useState<AiOverlaySession | null>(null);
+  const [projectAiUsage, setProjectAiUsage] =
+    useState<ProjectAiUsageSummary | null>(null);
+  const [projectCostById, setProjectCostById] = useState<
+    Record<string, ProjectAiCostTotal>
+  >({});
   const [copyError, setCopyError] = useState<string | null>(null);
   const [copyModal, setCopyModal] = useState<{
     copySet: AdCopySet;
@@ -231,6 +263,53 @@ function App() {
     null
   );
 
+  async function refreshProjectAiCostTotals() {
+    try {
+      const res = await fetch(`${API_BASE}/api/ai-usage/project-totals`);
+      if (!res.ok) return;
+      const data = (await res.json()) as ProjectAiCostTotalsResponse;
+      const next: Record<string, ProjectAiCostTotal> = {};
+      for (const item of data.projects) {
+        next[item.project_id] = item;
+      }
+      setProjectCostById(next);
+    } catch (err: unknown) {
+      console.warn(
+        "[ai-usage] Failed to load project AI cost totals:",
+        err instanceof Error ? err.message : err
+      );
+    }
+  }
+
+  async function refreshAiUsageForProject(
+    projectId: string,
+    updateSummary: boolean
+  ) {
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/ai-usage/summary?projectId=${encodeURIComponent(projectId)}`
+      );
+      if (!res.ok) return;
+      const summary = (await res.json()) as ProjectAiUsageSummary;
+      setProjectCostById((prev) => ({
+        ...prev,
+        [projectId]: {
+          project_id: projectId,
+          total_cost_usd: summary.total_cost_usd,
+          total_tokens: summary.total_tokens,
+        },
+      }));
+      if (updateSummary) {
+        setProjectAiUsage(summary);
+      }
+    } catch (err: unknown) {
+      console.warn(
+        "[ai-usage] Failed to load project AI usage summary:",
+        err instanceof Error ? err.message : err
+      );
+    }
+  }
+
   useEffect(() => {
     if (!isSupabaseConfigured) {
       return;
@@ -243,6 +322,7 @@ function App() {
         if (cancelled) return;
         setProjects(rows);
         setSelectedId(rows[0]?.id ?? null);
+        void refreshProjectAiCostTotals();
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -264,6 +344,55 @@ function App() {
 
   const selectedProject =
     projects.find((project) => project.id === selectedId) ?? null;
+
+  const displayedProjectAiUsage =
+    selectedId && projectAiUsage?.project_id === selectedId
+      ? projectAiUsage
+      : null;
+
+  async function refreshAllAiUsage(projectId: string) {
+    await Promise.all([
+      refreshProjectAiCostTotals(),
+      refreshAiUsageForProject(projectId, selectedId === projectId),
+    ]);
+  }
+
+  useEffect(() => {
+    if (!selectedId) return;
+
+    let cancelled = false;
+
+    const load = async () => {
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/ai-usage/summary?projectId=${encodeURIComponent(selectedId)}`
+        );
+        if (cancelled || !res.ok) return;
+        const summary = (await res.json()) as ProjectAiUsageSummary;
+        setProjectCostById((prev) => ({
+          ...prev,
+          [selectedId]: {
+            project_id: selectedId,
+            total_cost_usd: summary.total_cost_usd,
+            total_tokens: summary.total_tokens,
+          },
+        }));
+        setProjectAiUsage(summary);
+      } catch (err: unknown) {
+        if (cancelled) return;
+        console.warn(
+          "[ai-usage] Failed to load project AI usage summary:",
+          err instanceof Error ? err.message : err
+        );
+      }
+    };
+
+    void load();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId]);
 
   // Hydrate saved research sources for the selected project so they survive a
   // page refresh. Cached per project so we never refetch or clobber results.
@@ -600,10 +729,57 @@ function App() {
     }
   }
 
+  function beginAiOverlay(operation: AiOperation, sessionKey: string) {
+    setAiOverlaySession({
+      operation,
+      status: "running",
+      startedAt: Date.now(),
+      sessionKey,
+      usage: null,
+    });
+  }
+
+  function succeedAiOverlay(
+    usage: AiUsageSummary | null,
+    projectId?: string
+  ) {
+    setAiOverlaySession((prev) =>
+      prev?.status === "running"
+        ? { ...prev, status: "success", usage }
+        : prev
+    );
+    if (projectId) {
+      void refreshAllAiUsage(projectId);
+    }
+  }
+
+  function failAiOverlay(options: {
+    usage?: AiUsageSummary | null;
+    errorStage?: CopyFailureStage | null;
+    errorDetails?: string | null;
+  }) {
+    setAiOverlaySession((prev) =>
+      prev?.status === "running"
+        ? {
+            ...prev,
+            status: "error",
+            usage: options.usage ?? null,
+            errorStage: options.errorStage ?? null,
+            errorDetails: options.errorDetails ?? null,
+          }
+        : prev
+    );
+  }
+
+  function dismissAiOverlay() {
+    setAiOverlaySession(null);
+  }
+
   async function handleRunResearch(projectId: string) {
     setStatusMessage(null);
     setResearchError(null);
     setResearchingId(projectId);
+    beginAiOverlay("research", `research-${projectId}`);
 
     try {
       const res = await fetch(`${API_BASE}/api/research/run`, {
@@ -630,7 +806,9 @@ function App() {
       setStatusMessage(
         `Research complete: ${data.sources.length} sources saved.`
       );
+      succeedAiOverlay(data.ai_usage ?? parseAiUsage(payload), projectId);
     } catch (err: unknown) {
+      dismissAiOverlay();
       setResearchError(err instanceof Error ? err.message : "Research failed.");
     } finally {
       setResearchingId((current) => (current === projectId ? null : current));
@@ -641,6 +819,7 @@ function App() {
     setStatusMessage(null);
     setInsightError(null);
     setGeneratingInsightId(projectId);
+    beginAiOverlay("insight_report", `insight_report-${projectId}`);
 
     try {
       const res = await fetch(`${API_BASE}/api/insights/generate`, {
@@ -662,7 +841,9 @@ function App() {
       const data = payload as GenerateInsightResponse;
       setInsightByProject((prev) => ({ ...prev, [projectId]: data.insight }));
       setStatusMessage("Insight report generated.");
+      succeedAiOverlay(data.ai_usage ?? parseAiUsage(payload), projectId);
     } catch (err: unknown) {
+      dismissAiOverlay();
       setInsightError(
         err instanceof Error ? err.message : "Insight report failed."
       );
@@ -677,6 +858,7 @@ function App() {
     setStatusMessage(null);
     setAvatarError(null);
     setGeneratingAvatarId(projectId);
+    beginAiOverlay("customer_avatar", `customer_avatar-${projectId}`);
 
     try {
       const res = await fetch(`${API_BASE}/api/avatar/generate`, {
@@ -698,7 +880,9 @@ function App() {
       const data = payload as GenerateAvatarResponse;
       setAvatarByProject((prev) => ({ ...prev, [projectId]: data.avatar }));
       setStatusMessage("Customer avatar generated.");
+      succeedAiOverlay(data.ai_usage ?? parseAiUsage(payload), projectId);
     } catch (err: unknown) {
+      dismissAiOverlay();
       setAvatarError(
         err instanceof Error ? err.message : "Customer avatar failed."
       );
@@ -737,6 +921,7 @@ function App() {
       setCopySetsByProject((prev) => ({ ...prev, [projectId]: [] }));
       setCreativePromptSetsByProject((prev) => ({ ...prev, [projectId]: [] }));
       setStatusMessage("Mass desires generated.");
+      void refreshAllAiUsage(projectId);
     } catch (err: unknown) {
       setDesiresError(
         err instanceof Error ? err.message : "Mass desires failed."
@@ -752,6 +937,7 @@ function App() {
     setStatusMessage(null);
     setAnglesError(null);
     setGeneratingAnglesId(projectId);
+    beginAiOverlay("marketing_angles", `marketing_angles-${projectId}`);
 
     try {
       const res = await fetch(`${API_BASE}/api/angles/generate`, {
@@ -784,7 +970,9 @@ function App() {
       setStatusMessage(
         `Marketing angles generated: ${data.desires.reduce((n, g) => n + g.angles.length, 0)} angles.`
       );
+      succeedAiOverlay(data.ai_usage ?? parseAiUsage(payload), projectId);
     } catch (err: unknown) {
+      dismissAiOverlay();
       setAnglesError(
         err instanceof Error ? err.message : "Marketing angles failed."
       );
@@ -826,25 +1014,17 @@ function App() {
     setStatusMessage(null);
     setTofError(null);
     setGeneratingTofDesireId(massDesireId);
+    beginAiOverlay("tof_concepts", `tof_concepts-${massDesireId}`);
+
+    const url = `${API_BASE}/api/tof-concepts/generate`;
 
     try {
-      const res = await fetch(`${API_BASE}/api/tof-concepts/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId, massDesireId }),
-      });
+      const data = await apiPostJson<GenerateTofConceptsResponse>(
+        "/api/tof-concepts/generate",
+        { projectId, massDesireId },
+        "TOF concept generation failed."
+      );
 
-      const payload: unknown = await res.json().catch(() => null);
-
-      if (!res.ok) {
-        const message =
-          payload && typeof payload === "object" && "error" in payload
-            ? String((payload as { error: unknown }).error)
-            : `TOF concept generation failed (HTTP ${res.status}).`;
-        throw new Error(message);
-      }
-
-      const data = payload as GenerateTofConceptsResponse;
       setConceptSetsByProject((prev) => {
         const existing = prev[projectId] ?? [];
         const filtered = existing.filter(
@@ -857,9 +1037,17 @@ function App() {
       });
       openTofConcepts(data.conceptSet);
       setStatusMessage("Top of funnel concepts generated.");
+      succeedAiOverlay(data.ai_usage ?? null, projectId);
     } catch (err: unknown) {
+      dismissAiOverlay();
+      console.error("[tof] Generate TOF Concepts failed:", {
+        url,
+        error: err,
+      });
       setTofError(
-        err instanceof Error ? err.message : "TOF concept generation failed."
+        err instanceof Error
+          ? err.message
+          : "TOF concept generation failed."
       );
     } finally {
       setGeneratingTofDesireId((current) =>
@@ -875,6 +1063,7 @@ function App() {
     setStatusMessage(null);
     setCopyError(null);
     setGeneratingCopyAngleId(marketingAngleId);
+    beginAiOverlay("generate_copy", `generate_copy-${marketingAngleId}`);
 
     try {
       const res = await fetch(`${API_BASE}/api/copy/generate`, {
@@ -886,11 +1075,32 @@ function App() {
       const payload: unknown = await res.json().catch(() => null);
 
       if (!res.ok) {
+        const structured = parseCopyGenerateError(payload, res.status);
+        if (structured) {
+          failAiOverlay({
+            usage: structured.ai_usage ?? null,
+            errorStage: structured.stage,
+            errorDetails: copyErrorOverlayDetails(structured),
+          });
+          setCopyError(copyErrorBannerMessage(structured));
+          return;
+        }
+
         const message =
-          payload && typeof payload === "object" && "error" in payload
-            ? String((payload as { error: unknown }).error)
-            : `Ad copy failed (HTTP ${res.status}).`;
-        throw new Error(message);
+          payload && typeof payload === "object" && "details" in payload
+            ? String((payload as { details: unknown }).details)
+            : payload && typeof payload === "object" && "error" in payload
+              ? String((payload as { error: unknown }).error)
+              : res.status === 520
+                ? "The upstream request returned 520 with no body. The dev proxy may have timed out while the backend was still working."
+                : `Ad copy failed (HTTP ${res.status}).`;
+
+        failAiOverlay({
+          errorStage: "unknown",
+          errorDetails: message,
+        });
+        setCopyError(message);
+        return;
       }
 
       const data = payload as GenerateCopyResponse;
@@ -919,8 +1129,15 @@ function App() {
         generatedAngle?.angle_name ?? "Marketing angle"
       );
       setStatusMessage("Copy pack generated.");
+      succeedAiOverlay(data.ai_usage ?? parseAiUsage(payload), projectId);
     } catch (err: unknown) {
-      setCopyError(err instanceof Error ? err.message : "Ad copy failed.");
+      const message =
+        err instanceof Error ? err.message : "Ad copy failed.";
+      failAiOverlay({
+        errorStage: "unknown",
+        errorDetails: message,
+      });
+      setCopyError(message);
     } finally {
       setGeneratingCopyAngleId((current) =>
         current === marketingAngleId ? null : current
@@ -1010,38 +1227,54 @@ function App() {
     adIndex: number,
     mode: RegenerateMode
   ): Promise<AdCopySet> {
-    const res = await fetch(`${API_BASE}/api/copy/${copySet.id}/regenerate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ad_index: adIndex, mode }),
-    });
+    const operation: AiOperation =
+      mode === "image_prompt_only"
+        ? "regenerate_image_prompt"
+        : "regenerate_ad";
+    beginAiOverlay(operation, `${operation}-${copySet.id}`);
 
-    const payload: unknown = await res.json().catch(() => null);
+    try {
+      const res = await fetch(`${API_BASE}/api/copy/${copySet.id}/regenerate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ad_index: adIndex, mode }),
+      });
 
-    if (!res.ok) {
-      const message =
-        payload && typeof payload === "object" && "error" in payload
-          ? String((payload as { error: unknown }).error)
-          : `Failed to regenerate (HTTP ${res.status}).`;
-      throw new Error(message);
-    }
+      const payload: unknown = await res.json().catch(() => null);
 
-    const updated = (payload as RegenerateCopyResponse).copySet;
+      if (!res.ok) {
+        const message =
+          payload && typeof payload === "object" && "error" in payload
+            ? String((payload as { error: unknown }).error)
+            : `Failed to regenerate (HTTP ${res.status}).`;
+        throw new Error(message);
+      }
 
-    setCopySetsByProject((prev) => {
-      const existing = prev[updated.project_id] ?? [];
-      const next = existing.map((set) =>
-        set.id === updated.id ? updated : set
+      const updated = (payload as RegenerateCopyResponse).copySet;
+
+      setCopySetsByProject((prev) => {
+        const existing = prev[updated.project_id] ?? [];
+        const next = existing.map((set) =>
+          set.id === updated.id ? updated : set
+        );
+        return { ...prev, [updated.project_id]: next };
+      });
+      setCopyModal((current) =>
+        current && current.copySet.id === updated.id
+          ? { ...current, copySet: updated }
+          : current
       );
-      return { ...prev, [updated.project_id]: next };
-    });
-    setCopyModal((current) =>
-      current && current.copySet.id === updated.id
-        ? { ...current, copySet: updated }
-        : current
-    );
 
-    return updated;
+      succeedAiOverlay(
+        (payload as RegenerateCopyResponse).ai_usage ?? parseAiUsage(payload),
+        copySet.project_id
+      );
+
+      return updated;
+    } catch (error: unknown) {
+      dismissAiOverlay();
+      throw error;
+    }
   }
 
   async function handleGenerateCreativePrompts(
@@ -1082,6 +1315,7 @@ function App() {
         };
       });
       setStatusMessage("Creative prompts generated.");
+      void refreshAllAiUsage(projectId);
     } catch (err: unknown) {
       setCreativePromptError(
         err instanceof Error ? err.message : "Creative prompts failed."
@@ -1364,12 +1598,26 @@ function App() {
         openCopyPack(copySet, angleName)
       }
       onFixImageFilename={handleFixImageFilename}
+      projectAiUsage={displayedProjectAiUsage}
+      projectCostById={projectCostById}
     />
   );
 
   return (
     <>
       {shell}
+      {aiOverlaySession ? (
+        <AiProgressOverlay
+          key={aiOverlaySession.sessionKey}
+          operation={aiOverlaySession.operation}
+          status={aiOverlaySession.status}
+          startedAt={aiOverlaySession.startedAt}
+          usage={aiOverlaySession.usage}
+          errorStage={aiOverlaySession.errorStage}
+          errorDetails={aiOverlaySession.errorDetails}
+          onContinue={dismissAiOverlay}
+        />
+      ) : null}
       {copyModal ? (
         <CopyPackModal
           key={copyModal.copySet.id}

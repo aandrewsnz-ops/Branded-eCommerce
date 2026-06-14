@@ -11,6 +11,8 @@ import type {
   MassDesire,
   ProductProject,
   ProductProjectInput,
+  ProjectAiUsageSummary,
+  ProjectAiCostTotal,
   ResearchInsight,
   ResearchSource,
 } from "../types";
@@ -106,6 +108,9 @@ export interface AppShellProps {
     adIndex: number,
     safeFilename: string
   ) => Promise<AdCopySet>;
+
+  projectAiUsage: ProjectAiUsageSummary | null;
+  projectCostById: Record<string, ProjectAiCostTotal>;
 }
 
 export function AppShell(props: AppShellProps) {
@@ -230,6 +235,8 @@ export function AppShell(props: AppShellProps) {
         onCreateProject={props.onCreateProject}
         isCreating={props.isCreating}
         createError={props.createError}
+        projectAiUsage={props.projectAiUsage}
+        projectCostById={props.projectCostById}
       />
 
       <main className="centre">

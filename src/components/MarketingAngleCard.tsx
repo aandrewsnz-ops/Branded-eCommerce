@@ -55,6 +55,7 @@ export function MarketingAngleCard({
 
   // Debounced reviewer notes (persisted via onUpdateReview).
   const [localNotes, setLocalNotes] = useState(angle.reviewer_notes ?? "");
+  const [isSavingNotes, setIsSavingNotes] = useState(false);
   const notesDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSavedNotesRef = useRef(angle.reviewer_notes ?? "");
 
@@ -66,14 +67,23 @@ export function MarketingAngleCard({
 
   function handleNotesChange(value: string) {
     setLocalNotes(value);
+    setIsSavingNotes(false);
     if (notesDebounceRef.current) clearTimeout(notesDebounceRef.current);
     notesDebounceRef.current = setTimeout(() => {
       if (value !== lastSavedNotesRef.current) {
         lastSavedNotesRef.current = value;
+        setIsSavingNotes(true);
         onUpdateReview({ reviewer_notes: value });
       }
     }, 600);
   }
+
+  const notesSaveLabel =
+    isSavingNotes && isSavingReview
+      ? "Saving…"
+      : isSavingNotes && !isSavingReview
+        ? "Saved"
+        : null;
 
   return (
     <article
@@ -302,20 +312,30 @@ export function MarketingAngleCard({
         </div>
 
         <div className="angle-notes-row">
-          <label
-            className="angle-priority-label"
-            htmlFor={`reviewer-notes-${angle.id}`}
-          >
-            Reviewer notes
-          </label>
+          <div className="angle-notes-label-row">
+            <label
+              className="angle-priority-label"
+              htmlFor={`reviewer-notes-${angle.id}`}
+            >
+              Reviewer notes
+            </label>
+            {notesSaveLabel === "Saving…" ? (
+              <span className="angle-notes-hint">{notesSaveLabel}</span>
+            ) : notesSaveLabel === "Saved" ? (
+              <span className="angle-notes-hint angle-notes-hint-saved">
+                {notesSaveLabel}
+              </span>
+            ) : null}
+          </div>
           <textarea
             id={`reviewer-notes-${angle.id}`}
             className="angle-notes-input"
             rows={2}
             placeholder="Add review notes…"
             value={localNotes}
-            disabled={isSavingReview}
             onChange={(event) => handleNotesChange(event.target.value)}
+            onClick={(event) => event.stopPropagation()}
+            onMouseDown={(event) => event.stopPropagation()}
           />
         </div>
       </div>

@@ -9,9 +9,10 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import type { ProductProject, ProductProjectInput } from "../types";
+import type { ProductProject, ProductProjectInput, ProjectAiUsageSummary, ProjectAiCostTotal } from "../types";
 import type { ModeStatus, WorkflowMode } from "./workflow";
 import { WorkflowNav } from "./WorkflowNav";
+import { formatAiCost } from "../lib/aiUsageFormat";
 
 interface LeftRailProps {
   projects: ProductProject[];
@@ -34,6 +35,9 @@ interface LeftRailProps {
   onCreateProject: (event: React.FormEvent<HTMLFormElement>) => void;
   isCreating: boolean;
   createError: string | null;
+
+  projectAiUsage: ProjectAiUsageSummary | null;
+  projectCostById: Record<string, ProjectAiCostTotal>;
 }
 
 const BRIEF_FIELDS: {
@@ -95,6 +99,8 @@ export function LeftRail({
   onCreateProject,
   isCreating,
   createError,
+  projectAiUsage,
+  projectCostById,
 }: LeftRailProps) {
   const [showForm, setShowForm] = useState(false);
 
@@ -184,6 +190,9 @@ export function LeftRail({
           <ul className="rail-project-list">
             {projects.map((project) => {
               const isDeleting = deletingProjectId === project.id;
+              const aiCostLabel = formatAiCost(
+                projectCostById[project.id]?.total_cost_usd
+              );
               return (
                 <li key={project.id} className="rail-project-li">
                   <button
@@ -205,6 +214,11 @@ export function LeftRail({
                         <span className="meta-chip">
                           <Tag size={11} />
                           {project.planned_sale_price}
+                        </span>
+                      ) : null}
+                      {aiCostLabel ? (
+                        <span className="meta-chip meta-chip-ai">
+                          AI {aiCostLabel}
                         </span>
                       ) : null}
                     </span>
@@ -256,6 +270,12 @@ export function LeftRail({
               label="Sale price"
               value={selectedProject.planned_sale_price}
             />
+            <RailSummaryRow
+              label="AI cost"
+              value={formatAiCost(projectAiUsage?.total_cost_usd, {
+                showZero: true,
+              })}
+            />
           </div>
         </div>
       ) : null}
@@ -266,6 +286,7 @@ export function LeftRail({
           activeMode={mode}
           statuses={statuses}
           onChange={onChangeMode}
+          projectAiUsage={projectAiUsage}
         />
       </div>
     </aside>

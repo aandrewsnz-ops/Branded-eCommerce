@@ -1,5 +1,14 @@
 import OpenAI from "openai";
 import type { ProductProject, ResearchSourceDraft } from "../src/types";
+import {
+  type AiUsageLogContext,
+  type AiUsageSummary,
+  logAiUsageEvent,
+  normalizeOpenAiUsage,
+  estimateOpenAiCostUsd,
+  buildAiUsageSummary,
+  trackedResponsesCreate,
+} from "./ai-usage";
 
 /**
  * Model used for research. Easy to change in one place if the Responses API /
@@ -28,6 +37,218 @@ export function getOpenAI(): OpenAI {
     );
   }
   return new OpenAI({ apiKey });
+}
+
+/** Thrown when OpenAI fails after retries (upstream 5xx / network / timeout). */
+export class OpenAIUpstreamError extends Error {
+  readonly status?: number;
+  readonly details: string;
+
+  constructor(message: string, status?: number, details?: string) {
+    super(message);
+    this.name = "OpenAIUpstreamError";
+    this.status = status;
+    this.details = details ?? message;
+  }
+}
+
+const OPENAI_RETRYABLE_STATUSES = new Set([
+  500, 502, 503, 504, 520, 522, 524,
+]);
+
+const OPENAI_RETRY_BACKOFF_MS = [0, 800, 2000];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function readErrorStatus(error: unknown): number | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const record = error as Record<string, unknown>;
+  if (typeof record.status === "number") return record.status;
+  if (typeof record.statusCode === "number") return record.statusCode;
+  return undefined;
+}
+
+function isRetryableOpenAIError(error: unknown): boolean {
+  const status = readErrorStatus(error);
+  if (status !== undefined) {
+    if (status === 429) return false;
+    if (status >= 400 && status < 500) return false;
+    if (OPENAI_RETRYABLE_STATUSES.has(status)) return true;
+  }
+
+  const message = errorMessage(error).toLowerCase();
+  if (error instanceof Error && error.name === "AbortError") return true;
+  if (message.includes("timeout") || message.includes("timed out")) return true;
+  if (message.includes("econnreset") || message.includes("network")) return true;
+  if (message.includes("fetch failed") || message.includes("socket")) return true;
+
+  return status === undefined;
+}
+
+export interface CallOpenAIOptions {
+  timeoutMs?: number;
+  maxAttempts?: number;
+  usageContext?: AiUsageLogContext;
+}
+
+type OpenAICallResult = {
+  output_text?: string | null;
+  usage?: unknown;
+  id?: string;
+};
+
+/**
+ * Call OpenAI with timeout + retry on transient upstream/network failures.
+ * Returns output_text from the Responses API result and usage summaries when tracked.
+ */
+export async function callOpenAIWithRetry(
+  label: string,
+  call: (signal: AbortSignal) => Promise<OpenAICallResult>,
+  options: CallOpenAIOptions = {}
+): Promise<{ text: string; summaries: AiUsageSummary[] }> {
+  const timeoutMs = options.timeoutMs ?? 60_000;
+  const maxAttempts = options.maxAttempts ?? 3;
+  const usageContext = options.usageContext;
+  let lastError: unknown;
+  let lastStatus: number | undefined;
+  const summaries: AiUsageSummary[] = [];
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const backoff = OPENAI_RETRY_BACKOFF_MS[attempt - 1] ?? 2000;
+    if (backoff > 0) {
+      await sleep(backoff);
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const attemptStartedAt = Date.now();
+
+    try {
+      const response = await call(controller.signal);
+      clearTimeout(timer);
+      const text = response.output_text ?? "";
+      console.log(
+        `[${label}] OpenAI success attempt ${attempt}/${maxAttempts}, output chars: ${text.length}`
+      );
+
+      if (usageContext) {
+        const duration_ms = Date.now() - attemptStartedAt;
+        const model = OPENAI_MODEL;
+        const usage = normalizeOpenAiUsage(response);
+        const { cost, pricingMissing } = estimateOpenAiCostUsd(model, usage);
+        const metadata = {
+          ...(usageContext.metadata ?? {}),
+          attempt,
+          maxAttempts,
+          ...(pricingMissing ? { pricing_missing: true } : {}),
+        };
+
+        await logAiUsageEvent({
+          operation: usageContext.operation,
+          projectId: usageContext.projectId,
+          sourceRoute: usageContext.sourceRoute,
+          model,
+          status: "success",
+          input_tokens: usage.input_tokens,
+          output_tokens: usage.output_tokens,
+          total_tokens: usage.total_tokens,
+          cached_input_tokens: usage.cached_input_tokens,
+          estimated_cost_usd: cost,
+          duration_ms,
+          prompt_chars: usageContext.promptChars,
+          response_chars: text.length,
+          openai_request_id:
+            typeof response.id === "string" ? response.id : null,
+          metadata,
+        });
+
+        summaries.push(
+          buildAiUsageSummary(
+            usageContext,
+            model,
+            usage,
+            duration_ms
+          )
+        );
+      }
+
+      return { text, summaries };
+    } catch (error: unknown) {
+      clearTimeout(timer);
+      lastError = error;
+      lastStatus = readErrorStatus(error);
+
+      const isTimeout =
+        error instanceof Error &&
+        (error.name === "AbortError" ||
+          errorMessage(error).toLowerCase().includes("abort"));
+
+      console.warn(`[${label}] OpenAI attempt ${attempt}/${maxAttempts} failed:`, {
+        status: lastStatus,
+        message: isTimeout
+          ? "Request timed out"
+          : errorMessage(error),
+        retryable: isRetryableOpenAIError(error),
+        hasResponseBody: Boolean(errorMessage(error)),
+      });
+
+      if (!isRetryableOpenAIError(error) || attempt === maxAttempts) {
+        if (usageContext) {
+          await logAiUsageEvent({
+            operation: usageContext.operation,
+            projectId: usageContext.projectId,
+            sourceRoute: usageContext.sourceRoute,
+            model: OPENAI_MODEL,
+            status: "error",
+            duration_ms: Date.now() - attemptStartedAt,
+            prompt_chars: usageContext.promptChars,
+            error_status: lastStatus ?? null,
+            error_code:
+              error instanceof Error && "code" in error
+                ? String((error as { code: unknown }).code)
+                : null,
+            error_message: errorMessage(error).slice(0, 500),
+            metadata: {
+              ...(usageContext.metadata ?? {}),
+              attempt,
+              maxAttempts,
+            },
+          });
+        }
+        break;
+      }
+    }
+  }
+
+  const isTimeout =
+    lastError instanceof Error &&
+    (lastError.name === "AbortError" ||
+      errorMessage(lastError).toLowerCase().includes("abort"));
+
+  if (isTimeout) {
+    throw new OpenAIUpstreamError(
+      "OpenAI request timed out while generating TOF concepts.",
+      504,
+      `Timed out after ${timeoutMs}ms.`
+    );
+  }
+
+  const details =
+    lastStatus === 520
+      ? "The upstream API returned an empty 520 response. Try again, or reduce prompt context."
+      : errorMessage(lastError);
+
+  throw new OpenAIUpstreamError(
+    "OpenAI request failed after retries",
+    lastStatus ?? 502,
+    details
+  );
 }
 
 function buildPrompt(project: ProductProject): string {
@@ -175,17 +396,30 @@ function normalizeSources(parsed: unknown): ResearchSourceDraft[] {
  * Throws ResearchParseError (with raw text) if the model output is not JSON.
  */
 export async function runResearchForProject(
-  project: ProductProject
-): Promise<ResearchSourceDraft[]> {
+  project: ProductProject,
+  researchRunId?: string | null
+): Promise<{
+  drafts: ResearchSourceDraft[];
+  aiUsage: AiUsageSummary[];
+}> {
   const client = getOpenAI();
+  const input = buildPrompt(project);
 
-  const response = await client.responses.create({
-    model: OPENAI_MODEL,
-    tools: [{ type: "web_search" }],
-    input: buildPrompt(project),
-  });
-
-  const text = response.output_text ?? "";
+  const { text, summary } = await trackedResponsesCreate(
+    client,
+    {
+      operation: "research",
+      projectId: project.id,
+      sourceRoute: "/api/research/run",
+      promptChars: input.length,
+      metadata: researchRunId ? { research_run_id: researchRunId } : undefined,
+    },
+    {
+      model: OPENAI_MODEL,
+      tools: [{ type: "web_search" }],
+      input,
+    }
+  );
 
   let parsed: unknown;
   try {
@@ -197,5 +431,8 @@ export async function runResearchForProject(
     );
   }
 
-  return normalizeSources(parsed);
+  return {
+    drafts: normalizeSources(parsed),
+    aiUsage: [summary],
+  };
 }

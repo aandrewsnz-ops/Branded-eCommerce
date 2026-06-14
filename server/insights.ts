@@ -17,6 +17,10 @@ import {
   toStringValue,
   toStringArray,
 } from "./openai";
+import {
+  trackedResponsesCreate,
+  type AiUsageSummary,
+} from "./ai-usage";
 
 function buildPrompt(
   project: ProductProject,
@@ -190,16 +194,26 @@ function normalizeReport(parsed: unknown): ResearchInsightReport {
  */
 export async function generateInsightReport(
   project: ProductProject,
-  sources: ResearchSource[]
-): Promise<ResearchInsightReport> {
+  sources: ResearchSource[],
+  runId?: string | null
+): Promise<{ report: ResearchInsightReport; aiUsage: AiUsageSummary[] }> {
   const client = getOpenAI();
+  const input = buildPrompt(project, sources);
 
-  const response = await client.responses.create({
-    model: OPENAI_MODEL,
-    input: buildPrompt(project, sources),
-  });
-
-  const text = response.output_text ?? "";
+  const { text, summary } = await trackedResponsesCreate(
+    client,
+    {
+      operation: "insight-report",
+      projectId: project.id,
+      sourceRoute: "/api/insights/generate",
+      promptChars: input.length,
+      metadata: runId ? { research_run_id: runId } : undefined,
+    },
+    {
+      model: OPENAI_MODEL,
+      input,
+    }
+  );
 
   let parsed: unknown;
   try {
@@ -208,5 +222,8 @@ export async function generateInsightReport(
     throw new ResearchParseError("OpenAI did not return valid JSON.", text);
   }
 
-  return normalizeReport(parsed);
+  return {
+    report: normalizeReport(parsed),
+    aiUsage: [summary],
+  };
 }

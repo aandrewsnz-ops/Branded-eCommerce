@@ -9,6 +9,7 @@ import { getSupabase } from "./supabase";
 import {
   runResearchForProject,
   ResearchParseError,
+  OpenAIUpstreamError,
   OPENAI_MODEL,
 } from "./openai";
 import { generateInsightReport } from "./insights";
@@ -26,12 +27,21 @@ import {
 } from "./angles";
 import { generateAdCopy, regenerateAd, regenerateImagePrompt } from "./copy";
 import {
+  CopyGenerateError,
+  sendCopyGenerateError,
+} from "./copy-errors";
+import {
   buildNamedAdImageStoragePath,
   getAdImagePublicUrl,
   renameAdImageObject,
 } from "./ad-image-storage";
 import { generateCreativePrompts } from "./creative-prompts";
 import { generateTofConcepts } from "./tof-concepts";
+import { withAiUsage, withAiUsageSafe } from "./ai-usage";
+import {
+  getAllProjectAiCostTotals,
+  getProjectAiUsageSummary,
+} from "./ai-usage-summary";
 import { normalizeProject } from "../src/types";
 import type {
   AdCopySet,
@@ -47,7 +57,6 @@ import type {
   ResearchInsight,
   ResearchRun,
   ResearchSource,
-  ResearchSourceDraft,
 } from "../src/types";
 
 const PORT = 3001;
@@ -55,6 +64,19 @@ const PORT = 3001;
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(
+  (
+    err: Error & { status?: number; body?: unknown },
+    _req: express.Request,
+    res: express.Response,
+    next: express.NextFunction
+  ) => {
+    if (err instanceof SyntaxError && err.status === 400 && "body" in err) {
+      return res.status(400).json({ error: "Invalid JSON request body." });
+    }
+    next(err);
+  }
+);
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -69,6 +91,30 @@ app.get("/api/health", (_req, res) => {
       process.env.VITE_SUPABASE_URL && process.env.VITE_SUPABASE_ANON_KEY
     ),
   });
+});
+
+app.get("/api/ai-usage/summary", async (req, res) => {
+  const projectId = req.query.projectId;
+
+  if (typeof projectId !== "string" || projectId.trim().length === 0) {
+    return res.status(400).json({ error: "Missing or invalid 'projectId'." });
+  }
+
+  try {
+    const summary = await getProjectAiUsageSummary(projectId.trim());
+    return res.json(summary);
+  } catch (error: unknown) {
+    return res.status(500).json({ error: errorMessage(error) });
+  }
+});
+
+app.get("/api/ai-usage/project-totals", async (_req, res) => {
+  try {
+    const projects = await getAllProjectAiCostTotals();
+    return res.json({ projects });
+  } catch (error: unknown) {
+    return res.status(500).json({ error: errorMessage(error) });
+  }
 });
 
 app.post("/api/research/run", async (req, res) => {
@@ -134,9 +180,13 @@ app.post("/api/research/run", async (req, res) => {
   };
 
   // 3-7. Call OpenAI with web_search and gather sources.
-  let drafts: ResearchSourceDraft[];
+  let drafts;
+  let researchAiUsage;
   try {
-    drafts = await runResearchForProject(project);
+    ({ drafts, aiUsage: researchAiUsage } = await runResearchForProject(
+      project,
+      run.id
+    ));
   } catch (error: unknown) {
     const message = errorMessage(error);
     await markRunFailed(message);
@@ -193,7 +243,9 @@ app.post("/api/research/run", async (req, res) => {
   };
 
   // 10. Return the saved sources (and run) to the frontend.
-  return res.json({ run: completedRun, sources });
+  return res.json(
+    withAiUsage({ run: completedRun, sources }, researchAiUsage)
+  );
 });
 
 app.post("/api/insights/generate", async (req, res) => {
@@ -280,8 +332,13 @@ app.post("/api/insights/generate", async (req, res) => {
 
   // 6-7. Analyse the sources with OpenAI.
   let report;
+  let insightAiUsage;
   try {
-    report = await generateInsightReport(project, sources);
+    ({ report, aiUsage: insightAiUsage } = await generateInsightReport(
+      project,
+      sources,
+      run.id
+    ));
   } catch (error: unknown) {
     const message = errorMessage(error);
     if (error instanceof ResearchParseError) {
@@ -317,7 +374,7 @@ app.post("/api/insights/generate", async (req, res) => {
   const insight = insertedData as ResearchInsight;
 
   // 9. Return the saved insight report.
-  return res.json({ insight });
+  return res.json(withAiUsage({ insight }, insightAiUsage));
 });
 
 app.post("/api/avatar/generate", async (req, res) => {
@@ -395,8 +452,10 @@ app.post("/api/avatar/generate", async (req, res) => {
   }
 
   let avatarContent;
+  let avatarAiUsage;
   try {
-    avatarContent = await generateCustomerAvatar(project, insight, sources);
+    ({ avatar: avatarContent, aiUsage: avatarAiUsage } =
+      await generateCustomerAvatar(project, insight, sources));
   } catch (error: unknown) {
     const message = errorMessage(error);
     if (error instanceof ResearchParseError) {
@@ -427,7 +486,7 @@ app.post("/api/avatar/generate", async (req, res) => {
 
   const avatar = insertedData as CustomerAvatarOutput;
 
-  return res.json({ avatar });
+  return res.json(withAiUsage({ avatar }, avatarAiUsage));
 });
 
 app.post("/api/desires/generate", async (req, res) => {
@@ -688,13 +747,15 @@ app.post("/api/angles/generate", async (req, res) => {
   }
 
   let anglesContent;
+  let anglesAiUsage;
   try {
-    anglesContent = await generateMarketingAngles(
+    ({ content: anglesContent, aiUsage: anglesAiUsage } =
+      await generateMarketingAngles(
       project,
       insight,
       avatarOutput.content_json,
       massDesires
-    );
+    ));
   } catch (error: unknown) {
     const message = errorMessage(error);
     if (error instanceof ResearchParseError) {
@@ -772,7 +833,7 @@ app.post("/api/angles/generate", async (req, res) => {
       .sort((a, b) => a.sort_order - b.sort_order),
   }));
 
-  return res.json({ desires: grouped });
+  return res.json(withAiUsage({ desires: grouped }, anglesAiUsage));
 });
 
 const VALID_REVIEW_STATUSES = new Set([
@@ -886,12 +947,19 @@ app.patch("/api/angles/:angleId/review", async (req, res) => {
 });
 
 app.post("/api/copy/generate", async (req, res) => {
+  const routeStartedAt = Date.now();
   const body = req.body as {
     projectId?: unknown;
     marketingAngleId?: unknown;
   };
   const projectId = body.projectId;
   const marketingAngleId = body.marketingAngleId;
+
+  console.log("[COPY] route request received", {
+    project_id: projectId,
+    marketing_angle_id: marketingAngleId,
+    operation: "generate-copy",
+  });
 
   if (typeof projectId !== "string" || projectId.trim().length === 0) {
     return res.status(400).json({ error: "Missing or invalid 'projectId'." });
@@ -1015,21 +1083,32 @@ app.post("/api/copy/generate", async (req, res) => {
   const avatarOutput = avatarData as CustomerAvatarOutput;
 
   let copyContent;
+  let copyAiUsage;
   try {
-    copyContent = await generateAdCopy(
+    ({ content: copyContent, aiUsage: copyAiUsage } = await generateAdCopy(
       project,
       insight,
       avatarOutput.content_json,
       massDesire,
       angle
-    );
+    ));
   } catch (error: unknown) {
-    const message = errorMessage(error);
-    if (error instanceof ResearchParseError) {
-      return res.status(502).json({ error: message, raw: error.rawText });
-    }
-    return res.status(502).json({ error: message });
+    console.error("[COPY] generation failed before save", {
+      project_id: project.id,
+      marketing_angle_id: angle.id,
+      mass_desire_id: massDesire.id,
+      duration_ms: Date.now() - routeStartedAt,
+      error: errorMessage(error),
+    });
+    return sendCopyGenerateError(res, error);
   }
+
+  console.log("[COPY] saving copy set starting", {
+    project_id: project.id,
+    marketing_angle_id: angle.id,
+    mass_desire_id: massDesire.id,
+    duration_ms: Date.now() - routeStartedAt,
+  });
 
   const { error: deleteCopyError } = await supabase
     .from("ad_copy_sets")
@@ -1037,9 +1116,16 @@ app.post("/api/copy/generate", async (req, res) => {
     .eq("marketing_angle_id", marketingAngleId);
 
   if (deleteCopyError) {
-    return res.status(500).json({
-      error: `Failed to clear old ad copy: ${deleteCopyError.message}`,
-    });
+    console.error("[COPY] failed to clear old copy set", deleteCopyError.message);
+    return sendCopyGenerateError(
+      res,
+      new CopyGenerateError({
+        stage: "save",
+        details: `Failed to clear old ad copy: ${deleteCopyError.message}`,
+        httpStatus: 500,
+        aiUsageSummaries: copyAiUsage,
+      })
+    );
   }
 
   const { data: insertedData, error: insertError } = await supabase
@@ -1065,12 +1151,54 @@ app.post("/api/copy/generate", async (req, res) => {
     .single();
 
   if (insertError || !insertedData) {
-    return res.status(500).json({
-      error: `Failed to save ad copy set: ${insertError?.message ?? "unknown error"}`,
+    const details = `Failed to save ad copy set: ${insertError?.message ?? "unknown error"}`;
+    console.error("[COPY] saving copy set failed", {
+      project_id: project.id,
+      marketing_angle_id: angle.id,
+      details,
     });
+    return sendCopyGenerateError(
+      res,
+      new CopyGenerateError({
+        stage: "save",
+        details,
+        httpStatus: 500,
+        aiUsageSummaries: copyAiUsage,
+      })
+    );
   }
 
-  return res.json({ copySet: insertedData as AdCopySet });
+  console.log("[COPY] saving copy set success", {
+    project_id: project.id,
+    marketing_angle_id: angle.id,
+    copy_set_id: insertedData.id,
+    duration_ms: Date.now() - routeStartedAt,
+  });
+
+  try {
+    const payload = withAiUsageSafe(
+      { copySet: insertedData as AdCopySet },
+      copyAiUsage
+    );
+    console.log("[COPY] response returned to frontend", {
+      project_id: project.id,
+      marketing_angle_id: angle.id,
+      duration_ms: Date.now() - routeStartedAt,
+      has_ai_usage: Boolean(payload.ai_usage),
+    });
+    return res.json(payload);
+  } catch (error: unknown) {
+    console.error("[COPY] response serialization failed", errorMessage(error));
+    return sendCopyGenerateError(
+      res,
+      new CopyGenerateError({
+        stage: "response",
+        details: "Copy pack saved but the response could not be sent.",
+        httpStatus: 500,
+        aiUsageSummaries: copyAiUsage,
+      })
+    );
+  }
 });
 
 const AD_VARIATION_FIELDS = [
@@ -1568,17 +1696,20 @@ app.post("/api/copy/:copySetId/regenerate", async (req, res) => {
 
   const existing = ads[adIndex];
   let nextAd: AdVariation;
+  let regenerateAiUsage;
   try {
     if (mode === "full_ad") {
-      const regenerated = await regenerateAd(
+      const { ad: regenerated, aiUsage } = await regenerateAd(
         project,
         insight,
         avatarOutput.content_json,
         massDesire,
         angle,
         ads,
-        adIndex
+        adIndex,
+        copySetId
       );
+      regenerateAiUsage = aiUsage;
       nextAd = {
         ...regenerated,
         locked: existing.locked ?? false,
@@ -1598,14 +1729,17 @@ app.post("/api/copy/:copySetId/regenerate", async (req, res) => {
         last_regenerated_at: new Date().toISOString(),
       };
     } else {
-      const regenerated = await regenerateImagePrompt(
+      const { visual: regenerated, aiUsage } = await regenerateImagePrompt(
         project,
         insight,
         avatarOutput.content_json,
         massDesire,
         angle,
-        existing
+        existing,
+        copySetId,
+        adIndex
       );
+      regenerateAiUsage = aiUsage;
       nextAd = {
         ...existing,
         visual_strategy: regenerated.visual_strategy,
@@ -1637,7 +1771,9 @@ app.post("/api/copy/:copySetId/regenerate", async (req, res) => {
     });
   }
 
-  return res.json({ copySet: updated as AdCopySet });
+  return res.json(
+    withAiUsage({ copySet: updated as AdCopySet }, regenerateAiUsage)
+  );
 });
 
 app.post("/api/creative-prompts/generate", async (req, res) => {
@@ -1860,213 +1996,346 @@ app.post("/api/creative-prompts/generate", async (req, res) => {
 /* Top-of-funnel desire concepts (mass desire level)                    */
 /* ==================================================================== */
 
-app.post("/api/tof-concepts/generate", async (req, res) => {
-  const body = req.body as {
-    projectId?: unknown;
-    massDesireId?: unknown;
-  };
-  const projectId = body.projectId;
-  const massDesireId = body.massDesireId;
+const DESIRE_CONCEPTS_SQL_HINT =
+  "desire_concept_sets table not found. Run supabase/desire_concept_sets.sql in Supabase SQL editor, then notify pgrst, 'reload schema';";
 
-  if (typeof projectId !== "string" || projectId.trim().length === 0) {
-    return res.status(400).json({ error: "Missing or invalid 'projectId'." });
-  }
+function isMissingTableError(message: string, code?: string): boolean {
+  const msg = message.toLowerCase();
+  return (
+    code === "42P01" ||
+    msg.includes("does not exist") ||
+    msg.includes("could not find the table") ||
+    msg.includes("schema cache")
+  );
+}
 
-  if (typeof massDesireId !== "string" || massDesireId.trim().length === 0) {
-    return res.status(400).json({ error: "Missing or invalid 'massDesireId'." });
-  }
-
-  if (!process.env.OPENAI_API_KEY) {
-    return res
-      .status(500)
-      .json({ error: "OPENAI_API_KEY is not set on the backend (.env.local)." });
-  }
-
-  let supabase: ReturnType<typeof getSupabase>;
-  try {
-    supabase = getSupabase();
-  } catch (error: unknown) {
-    return res.status(500).json({ error: errorMessage(error) });
-  }
-
-  const { data: projectData, error: projectError } = await supabase
-    .from("projects")
-    .select("*")
-    .eq("id", projectId)
-    .single();
-
-  if (projectError || !projectData) {
-    return res.status(404).json({
-      error: `Project not found: ${projectError?.message ?? projectId}`,
-    });
-  }
-
-  const project = normalizeProject(projectData as ProductProject);
-
-  const { data: desireData, error: desireError } = await supabase
-    .from("mass_desires")
-    .select("*")
-    .eq("id", massDesireId)
-    .single();
-
-  if (desireError || !desireData) {
-    return res.status(404).json({
-      error: `Mass desire not found: ${desireError?.message ?? massDesireId}`,
-    });
-  }
-
-  const massDesire = desireData as MassDesire;
-
-  if (massDesire.project_id !== project.id) {
-    return res.status(400).json({
-      error: "Mass desire does not belong to this project.",
-    });
-  }
-
-  const { data: insightData, error: insightError } = await supabase
-    .from("research_insights")
-    .select("*")
-    .eq("project_id", project.id)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (insightError) {
-    return res.status(500).json({
-      error: `Failed to load insight report: ${insightError.message}`,
-    });
-  }
-
-  if (!insightData) {
-    return res.status(400).json({
-      error:
-        "No insight report found. Please run Generate Insight Report first.",
-    });
-  }
-
-  const insight = insightData as ResearchInsight;
-
-  const { data: avatarData, error: avatarError } = await supabase
-    .from("generated_outputs")
-    .select("*")
-    .eq("project_id", project.id)
-    .eq("output_type", "customer_avatar")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (avatarError) {
-    return res.status(500).json({
-      error: `Failed to load customer avatar: ${avatarError.message}`,
-    });
-  }
-
-  if (!avatarData) {
-    return res.status(400).json({
-      error:
-        "No customer avatar found. Please run Generate Customer Avatar first.",
-    });
-  }
-
-  const avatarOutput = avatarData as CustomerAvatarOutput;
-
-  let generated;
-  try {
-    generated = await generateTofConcepts(
-      project,
-      insight,
-      avatarOutput.content_json,
-      massDesire
-    );
-  } catch (error: unknown) {
-    const message = errorMessage(error);
-    if (error instanceof ResearchParseError) {
-      return res.status(502).json({ error: message, raw: error.rawText });
-    }
-    return res.status(502).json({ error: message });
-  }
-
-  const now = new Date().toISOString();
-
-  const { error: deleteSetError } = await supabase
+async function loadDesireConceptSet(
+  supabase: ReturnType<typeof getSupabase>,
+  projectId: string,
+  massDesireId: string
+): Promise<DesireConceptSet | null> {
+  const { data: setRow, error: setError } = await supabase
     .from("desire_concept_sets")
-    .delete()
-    .eq("mass_desire_id", massDesireId);
+    .select("*")
+    .eq("project_id", projectId)
+    .eq("mass_desire_id", massDesireId)
+    .maybeSingle();
 
-  if (deleteSetError) {
-    const msg = deleteSetError.message.toLowerCase();
-    const tableMissing =
-      deleteSetError.code === "42P01" ||
-      msg.includes("does not exist") ||
-      msg.includes("could not find the table");
-    if (!tableMissing) {
-      return res.status(500).json({
+  if (setError) {
+    if (isMissingTableError(setError.message, setError.code)) {
+      throw new Error(DESIRE_CONCEPTS_SQL_HINT);
+    }
+    throw new Error(`Failed to load TOF concept set: ${setError.message}`);
+  }
+
+  if (!setRow) return null;
+
+  const { data: conceptRows, error: conceptsError } = await supabase
+    .from("desire_concepts")
+    .select("*")
+    .eq("concept_set_id", setRow.id)
+    .order("concept_number", { ascending: true });
+
+  if (conceptsError) {
+    if (isMissingTableError(conceptsError.message, conceptsError.code)) {
+      throw new Error(DESIRE_CONCEPTS_SQL_HINT);
+    }
+    throw new Error(`Failed to load TOF concepts: ${conceptsError.message}`);
+  }
+
+  return {
+    ...(setRow as Omit<DesireConceptSet, "concepts">),
+    concepts: (conceptRows ?? []) as DesireConcept[],
+  };
+}
+
+async function handleGenerateTofConcepts(
+  req: express.Request,
+  res: express.Response
+): Promise<void> {
+  try {
+    const body = req.body as {
+      projectId?: unknown;
+      massDesireId?: unknown;
+      massDesireIndex?: unknown;
+    };
+    const projectId = body.projectId;
+    const massDesireId = body.massDesireId;
+
+    if (typeof projectId !== "string" || projectId.trim().length === 0) {
+      res.status(400).json({ error: "Missing or invalid 'projectId'." });
+      return;
+    }
+
+    if (typeof massDesireId !== "string" || massDesireId.trim().length === 0) {
+      res.status(400).json({ error: "Missing or invalid 'massDesireId'." });
+      return;
+    }
+
+    if (!process.env.OPENAI_API_KEY) {
+      res.status(500).json({
+        error: "OPENAI_API_KEY is not set on the backend (.env.local).",
+      });
+      return;
+    }
+
+    let supabase: ReturnType<typeof getSupabase>;
+    try {
+      supabase = getSupabase();
+    } catch (error: unknown) {
+      res.status(500).json({ error: errorMessage(error) });
+      return;
+    }
+
+    const { data: projectData, error: projectError } = await supabase
+      .from("projects")
+      .select("*")
+      .eq("id", projectId)
+      .single();
+
+    if (projectError || !projectData) {
+      res.status(404).json({
+        error: `Project not found: ${projectError?.message ?? projectId}`,
+      });
+      return;
+    }
+
+    const project = normalizeProject(projectData as ProductProject);
+
+    const { data: desireData, error: desireError } = await supabase
+      .from("mass_desires")
+      .select("*")
+      .eq("id", massDesireId)
+      .single();
+
+    if (desireError || !desireData) {
+      res.status(404).json({
+        error: `Mass desire not found: ${desireError?.message ?? massDesireId}`,
+      });
+      return;
+    }
+
+    const massDesire = desireData as MassDesire;
+
+    if (massDesire.project_id !== project.id) {
+      res.status(400).json({
+        error: "Mass desire does not belong to this project.",
+      });
+      return;
+    }
+
+    const { data: insightData, error: insightError } = await supabase
+      .from("research_insights")
+      .select("*")
+      .eq("project_id", project.id)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (insightError) {
+      res.status(500).json({
+        error: `Failed to load insight report: ${insightError.message}`,
+      });
+      return;
+    }
+
+    if (!insightData) {
+      res.status(400).json({
+        error:
+          "No insight report found. Please run Generate Insight Report first.",
+      });
+      return;
+    }
+
+    const insight = insightData as ResearchInsight;
+
+    const { data: avatarData, error: avatarError } = await supabase
+      .from("generated_outputs")
+      .select("*")
+      .eq("project_id", project.id)
+      .eq("output_type", "customer_avatar")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (avatarError) {
+      res.status(500).json({
+        error: `Failed to load customer avatar: ${avatarError.message}`,
+      });
+      return;
+    }
+
+    if (!avatarData) {
+      res.status(400).json({
+        error:
+          "No customer avatar found. Please run Generate Customer Avatar first.",
+      });
+      return;
+    }
+
+    const avatarOutput = avatarData as CustomerAvatarOutput;
+
+    let generated;
+    try {
+      generated = await generateTofConcepts(
+        project,
+        insight,
+        avatarOutput.content_json,
+        massDesire
+      );
+    } catch (error: unknown) {
+      if (error instanceof OpenAIUpstreamError) {
+        res.status(502).json({
+          error: error.message,
+          status: error.status ?? 520,
+          details: error.details,
+        });
+        return;
+      }
+      const message = errorMessage(error);
+      if (error instanceof ResearchParseError) {
+        res.status(502).json({ error: message, raw: error.rawText });
+        return;
+      }
+      res.status(502).json({ error: message });
+      return;
+    }
+
+    const now = new Date().toISOString();
+
+    const { error: deleteSetError } = await supabase
+      .from("desire_concept_sets")
+      .delete()
+      .eq("mass_desire_id", massDesireId);
+
+    if (deleteSetError && !isMissingTableError(deleteSetError.message, deleteSetError.code)) {
+      res.status(500).json({
         error: `Failed to clear old TOF concepts: ${deleteSetError.message}`,
       });
+      return;
     }
-  }
 
-  const { data: insertedSet, error: insertSetError } = await supabase
-    .from("desire_concept_sets")
-    .insert({
+    const { data: insertedSet, error: insertSetError } = await supabase
+      .from("desire_concept_sets")
+      .insert({
+        project_id: project.id,
+        mass_desire_id: massDesire.id,
+        source_desire_title: massDesire.desire_statement,
+        source_desire_summary: generated.sourceSummary,
+        status: "generated",
+        updated_at: now,
+      })
+      .select()
+      .single();
+
+    if (insertSetError || !insertedSet) {
+      const msg = insertSetError?.message ?? "unknown error";
+      if (isMissingTableError(msg, insertSetError?.code)) {
+        res.status(500).json({ error: DESIRE_CONCEPTS_SQL_HINT });
+        return;
+      }
+      res.status(500).json({
+        error: `Failed to save TOF concept set: ${msg}`,
+      });
+      return;
+    }
+
+    const conceptRows = generated.concepts.map((concept, index) => ({
+      concept_set_id: insertedSet.id,
       project_id: project.id,
       mass_desire_id: massDesire.id,
-      source_desire_title: massDesire.desire_statement,
-      source_desire_summary: generated.sourceSummary,
-      status: "generated",
+      concept_number: index + 1,
+      concept_title: concept.concept_title,
+      headline: concept.headline,
+      support_line: concept.support_line,
+      overlay_recommendation: concept.overlay_recommendation,
+      visual_strategy: concept.visual_strategy,
+      rationale: concept.rationale,
+      image_prompt: concept.image_prompt,
       updated_at: now,
-    })
-    .select()
-    .single();
+    }));
 
-  if (insertSetError || !insertedSet) {
-    const msg = insertSetError?.message ?? "unknown error";
-    if (/does not exist|could not find the table/i.test(msg)) {
-      return res.status(500).json({
-        error:
-          "desire_concept_sets table not found. Run supabase/desire_concept_sets.sql in Supabase first.",
+    const { data: insertedConcepts, error: insertConceptsError } = await supabase
+      .from("desire_concepts")
+      .insert(conceptRows)
+      .select();
+
+    if (insertConceptsError || !insertedConcepts) {
+      const msg = insertConceptsError?.message ?? "unknown error";
+      if (isMissingTableError(msg, insertConceptsError?.code)) {
+        res.status(500).json({ error: DESIRE_CONCEPTS_SQL_HINT });
+        return;
+      }
+      res.status(500).json({
+        error: `Failed to save TOF concepts: ${msg}`,
       });
+      return;
     }
-    return res.status(500).json({
-      error: `Failed to save TOF concept set: ${msg}`,
+
+    const conceptSet: DesireConceptSet = {
+      ...(insertedSet as Omit<DesireConceptSet, "concepts">),
+      concepts: (insertedConcepts as DesireConcept[]).sort(
+        (a, b) => a.concept_number - b.concept_number
+      ),
+    };
+
+    res.json(withAiUsage({ conceptSet }, generated.aiUsage));
+  } catch (error: unknown) {
+    console.error("[api] TOF concept generation failed:", error);
+    res.status(500).json({
+      error: errorMessage(error) || "Unexpected server error during TOF generation.",
     });
   }
+}
 
-  const conceptRows = generated.concepts.map((concept, index) => ({
-    concept_set_id: insertedSet.id,
-    project_id: project.id,
-    mass_desire_id: massDesire.id,
-    concept_number: index + 1,
-    concept_title: concept.concept_title,
-    headline: concept.headline,
-    support_line: concept.support_line,
-    overlay_recommendation: concept.overlay_recommendation,
-    visual_strategy: concept.visual_strategy,
-    rationale: concept.rationale,
-    image_prompt: concept.image_prompt,
-    updated_at: now,
-  }));
+async function handleGetDesireConcepts(
+  req: express.Request,
+  res: express.Response
+): Promise<void> {
+  try {
+    const projectId = req.query.projectId;
+    const massDesireId = req.query.massDesireId;
 
-  const { data: insertedConcepts, error: insertConceptsError } = await supabase
-    .from("desire_concepts")
-    .insert(conceptRows)
-    .select();
+    if (typeof projectId !== "string" || projectId.trim().length === 0) {
+      res.status(400).json({ error: "Missing or invalid 'projectId' query param." });
+      return;
+    }
 
-  if (insertConceptsError || !insertedConcepts) {
-    return res.status(500).json({
-      error: `Failed to save TOF concepts: ${insertConceptsError?.message ?? "unknown error"}`,
-    });
+    if (typeof massDesireId !== "string" || massDesireId.trim().length === 0) {
+      res.status(400).json({ error: "Missing or invalid 'massDesireId' query param." });
+      return;
+    }
+
+    let supabase: ReturnType<typeof getSupabase>;
+    try {
+      supabase = getSupabase();
+    } catch (error: unknown) {
+      res.status(500).json({ error: errorMessage(error) });
+      return;
+    }
+
+    const conceptSet = await loadDesireConceptSet(
+      supabase,
+      projectId,
+      massDesireId
+    );
+
+    if (!conceptSet) {
+      res.status(404).json({ error: "No saved TOF concepts for this mass desire." });
+      return;
+    }
+
+    res.json({ conceptSet });
+  } catch (error: unknown) {
+    console.error("[api] Load TOF concepts failed:", error);
+    res.status(500).json({ error: errorMessage(error) });
   }
+}
 
-  const conceptSet: DesireConceptSet = {
-    ...(insertedSet as Omit<DesireConceptSet, "concepts">),
-    concepts: (insertedConcepts as DesireConcept[]).sort(
-      (a, b) => a.concept_number - b.concept_number
-    ),
-  };
-
-  return res.json({ conceptSet });
-});
+app.post("/api/tof-concepts/generate", handleGenerateTofConcepts);
+app.post("/api/desire-concepts/generate", handleGenerateTofConcepts);
+app.get("/api/tof-concepts", handleGetDesireConcepts);
+app.get("/api/desire-concepts", handleGetDesireConcepts);
 
 /* ==================================================================== */
 /* Ad candidates (selected, publishable ad units)                       */

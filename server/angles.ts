@@ -15,6 +15,10 @@ import {
   toStringValue,
   toStringArray,
 } from "./openai";
+import {
+  trackedResponsesCreate,
+  type AiUsageSummary,
+} from "./ai-usage";
 
 export const EXPECTED_ANGLES_PER_DESIRE = 5;
 
@@ -250,15 +254,27 @@ export async function generateMarketingAngles(
   insight: ResearchInsight,
   avatar: CustomerAvatarContent,
   massDesires: MassDesire[]
-): Promise<MarketingAnglesContent> {
+): Promise<{ content: MarketingAnglesContent; aiUsage: AiUsageSummary[] }> {
   const client = getOpenAI();
+  const input = buildPrompt(project, insight, avatar, massDesires);
 
-  const response = await client.responses.create({
-    model: OPENAI_MODEL,
-    input: buildPrompt(project, insight, avatar, massDesires),
-  });
-
-  const text = response.output_text ?? "";
+  const { text, summary } = await trackedResponsesCreate(
+    client,
+    {
+      operation: "marketing-angles",
+      projectId: project.id,
+      sourceRoute: "/api/angles/generate",
+      promptChars: input.length,
+      metadata: {
+        research_run_id: insight.run_id ?? null,
+        mass_desire_count: massDesires.length,
+      },
+    },
+    {
+      model: OPENAI_MODEL,
+      input,
+    }
+  );
 
   let parsed: unknown;
   try {
@@ -269,5 +285,5 @@ export async function generateMarketingAngles(
 
   const content = normalizeAngleGroups(parsed);
   validateAngleGroups(content, massDesires);
-  return content;
+  return { content, aiUsage: [summary] };
 }

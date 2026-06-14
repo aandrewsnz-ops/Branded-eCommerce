@@ -18,6 +18,10 @@ import {
   toStringValue,
   toStringArray,
 } from "./openai";
+import {
+  trackedResponsesCreate,
+  type AiUsageSummary,
+} from "./ai-usage";
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object"
@@ -258,15 +262,27 @@ export async function generateCustomerAvatar(
   project: ProductProject,
   insight: ResearchInsight,
   sources: ResearchSource[]
-): Promise<CustomerAvatarContent> {
+): Promise<{ avatar: CustomerAvatarContent; aiUsage: AiUsageSummary[] }> {
   const client = getOpenAI();
+  const input = buildPrompt(project, insight, sources);
 
-  const response = await client.responses.create({
-    model: OPENAI_MODEL,
-    input: buildPrompt(project, insight, sources),
-  });
-
-  const text = response.output_text ?? "";
+  const { text, summary } = await trackedResponsesCreate(
+    client,
+    {
+      operation: "customer-avatar",
+      projectId: project.id,
+      sourceRoute: "/api/avatar/generate",
+      promptChars: input.length,
+      metadata: {
+        research_run_id: insight.run_id ?? null,
+        insight_id: insight.id,
+      },
+    },
+    {
+      model: OPENAI_MODEL,
+      input,
+    }
+  );
 
   let parsed: unknown;
   try {
@@ -275,5 +291,8 @@ export async function generateCustomerAvatar(
     throw new ResearchParseError("OpenAI did not return valid JSON.", text);
   }
 
-  return normalizeAvatar(parsed);
+  return {
+    avatar: normalizeAvatar(parsed),
+    aiUsage: [summary],
+  };
 }

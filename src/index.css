@@ -350,6 +350,15 @@ p {
   padding: 2px 8px;
 }
 
+.meta-chip-ai {
+  color: var(--accent-hover);
+  border-color: rgba(99, 102, 241, 0.35);
+  background: rgba(99, 102, 241, 0.1);
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---------- Detail ---------- */
 .detail {
   display: flex;
@@ -1534,6 +1543,19 @@ p {
   color: #1e8449;
   background: color-mix(in srgb, #27ae60 14%, transparent);
   border: 1px solid color-mix(in srgb, #27ae60 30%, transparent);
+}
+
+.workflow-nav-cost {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  color: var(--accent-hover);
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(99, 102, 241, 0.12);
+  border: 1px solid rgba(99, 102, 241, 0.28);
 }
 
 /* ---------- Brief form ---------- */
@@ -4491,6 +4513,22 @@ p {
   gap: 5px;
 }
 
+.angle-notes-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.angle-notes-hint {
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+.angle-notes-hint-saved {
+  color: #86efac;
+}
+
 .angle-notes-input {
   width: 100%;
   resize: vertical;
@@ -4763,4 +4801,323 @@ p {
   flex-wrap: wrap;
   gap: 8px;
   padding-top: 2px;
+}
+
+/* ==================================================================== */
+/* AI progress overlay                                                  */
+/* ==================================================================== */
+
+.ai-progress-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(8, 10, 14, 0.72);
+  backdrop-filter: blur(4px);
+}
+
+.ai-progress-card {
+  width: min(100%, 480px);
+  max-height: min(92vh, 720px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 24px 26px 20px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow:
+    0 24px 48px rgba(0, 0, 0, 0.45),
+    0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+}
+
+.ai-progress-head {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.ai-progress-spinner {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--accent);
+  opacity: 0.9;
+}
+
+.ai-progress-title {
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+
+.ai-progress-desc {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+
+.ai-progress-timers {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.ai-progress-timer-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+}
+
+.ai-progress-timer-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.ai-progress-timer-value {
+  font-size: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  letter-spacing: -0.02em;
+}
+
+.ai-progress-timer-value.is-overtime {
+  color: var(--accent);
+}
+
+.ai-progress-timer-elapsed {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.ai-progress-bar-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+
+.ai-progress-bar-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    rgba(var(--accent-rgb, 99, 179, 237), 0.55),
+    var(--accent)
+  );
+  transition: width 0.35s ease;
+}
+
+.ai-progress-reassurance,
+.ai-progress-overtime {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+
+.ai-progress-overtime {
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  color: var(--text);
+}
+
+.ai-progress-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-progress-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-faint);
+  transition: color 0.2s ease;
+}
+
+.ai-progress-step.is-active {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.ai-progress-step.is-done {
+  color: var(--text-muted);
+}
+
+.ai-progress-step-marker {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--border-subtle);
+}
+
+.ai-progress-step.is-active .ai-progress-step-marker {
+  background: var(--accent);
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb, 99, 179, 237), 0.2);
+}
+
+.ai-progress-step.is-done .ai-progress-step-marker {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.ai-progress-tech {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+.ai-progress-foot {
+  margin-top: 4px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.ai-progress-foot p {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+
+.ai-progress-debug {
+  margin-top: 6px !important;
+  font-size: 10px !important;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  opacity: 0.65;
+}
+
+.ai-progress-overlay.is-success {
+  background: rgba(8, 10, 14, 0.78);
+}
+
+.ai-progress-overlay.is-error {
+  background: rgba(8, 10, 14, 0.82);
+}
+
+.ai-progress-success-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: #6ee7a0;
+}
+
+.ai-progress-error-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: #fca5a5;
+}
+
+.ai-progress-error-stage {
+  margin: 6px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #fca5a5;
+}
+
+.ai-progress-usage {
+  padding: 14px 16px;
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+}
+
+.ai-progress-usage-grid {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+}
+
+.ai-progress-usage-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ai-progress-usage-item-wide {
+  grid-column: 1 / -1;
+}
+
+.ai-progress-usage-item dt {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.ai-progress-usage-item dd {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.ai-progress-usage-missing {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+
+.ai-progress-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.ai-progress-continue {
+  min-width: 120px;
+}
+
+.ai-progress-error {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #fca5a5;
+  background: rgba(220, 38, 38, 0.08);
+  border: 1px solid rgba(248, 113, 113, 0.25);
+  border-radius: 8px;
+}
+
+@media (max-width: 480px) {
+  .ai-progress-timers {
+    grid-template-columns: 1fr;
+  }
+
+  .ai-progress-timer-value {
+    font-size: 18px;
+  }
 }

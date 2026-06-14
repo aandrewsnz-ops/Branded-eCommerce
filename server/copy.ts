@@ -14,6 +14,16 @@ import {
   extractJson,
   toStringValue,
 } from "./openai";
+import {
+  aggregateAiUsage,
+  trackedResponsesCreate,
+  type AiUsageLogContext,
+  type AiUsageSummary,
+} from "./ai-usage";
+import { CopyGenerateError } from "./copy-errors";
+import { saveGenerateCopyDebugResponse } from "./copy-debug";
+
+const GENERATE_COPY_OPENAI_TIMEOUT_MS = 240_000;
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object"
@@ -104,6 +114,14 @@ function buildPrompt(
     "  Ad 4 — Emotional relief or confidence",
     "  Ad 5 — Offer or product value angle (if an offer exists; otherwise a",
     "         strong product-value / reason-to-buy-now angle)",
+    ...(hasReviewerNotes(angle)
+      ? [
+          "",
+          "When reviewer notes are present, reserve 2 of the 5 ad variations for",
+          "reviewer-inspired visual concepts, while keeping the other 3 varied across",
+          "the required ad spread above.",
+        ]
+      : []),
     "",
     "Use the mass desire statement as a CORE hook source. If it is strong,",
     "preserve it almost verbatim in at least one ad. In other ads keep the same",
@@ -129,27 +147,8 @@ function buildPrompt(
     "  product role.",
     "",
     "IMAGE PROMPT RULES (extremely important):",
-    "- Each image_prompt must be ready to paste directly into ChatGPT image",
-    "  generation, designed for Facebook/Instagram audiences with a ~2-second",
-    "  attention span.",
-    "- It must create an immediate dopamine hit through one or more of:",
-    "  recognition, curiosity, relief, status, visual satisfaction, emotional",
-    "  validation, or a clean surprising product moment. Get the message across fast.",
-    "- Each prompt must specify: Scene, Subject, Product placement, Mood, Camera",
-    "  style, Lighting, Composition, whether text overlay is needed (and the one",
-    "  short overlay line if useful), Square 1:1 Meta ad format, and a clear",
-    "  instruction to keep the image simple and scroll-stopping.",
-    "- Not every image should have text. If the visual hook is strong, specify NO",
-    "  text overlay. If text helps, use ONE short line only. Avoid clutter and",
-    "  long overlays.",
-    "- Avoid: fake before-and-after, medical/clinical proof visuals, exaggerated",
-    "  transformation, and anything that makes the viewer look defective or shamed.",
-    "  The image must support the copy, not fight it.",
-    "- Good visual formats: mirror pause moment; face routine vs forgotten",
-    "  neck/chest; clean bathroom skincare ritual; POV routine shot; product",
-    "  applicator close-up; premium flat lay; UGC-style phone photo; simple",
-    "  text-led ad with one punchy line; a polished outfit / neckline moment; a",
-    "  product hero that makes the built-in massage applicator obvious.",
+    ...IMAGE_PROMPT_RULE_LINES.map((line) => `- ${line}`),
+    "- The image must support the copy, not fight it.",
     "",
     "Truthfulness safeguards (always apply):",
     "- Do NOT invent testimonials, proof, statistics, clinical studies, or",
@@ -185,8 +184,7 @@ function buildPrompt(
       2
     ),
     "",
-    "Selected marketing angle:",
-    JSON.stringify(angle, null, 2),
+    ...angleContextLines(angle, "pack"),
     "",
     "Insight report (for customer language and emotion):",
     JSON.stringify(
@@ -240,27 +238,87 @@ function copyFieldsOnly(ad: AdVariation): Omit<
   };
 }
 
-const IMAGE_PROMPT_RULES = [
-  "The image_prompt must be ready to paste directly into ChatGPT image",
-  "generation, designed for Facebook/Instagram audiences with a ~2-second",
-  "attention span. It must create a fast dopamine hit through recognition,",
-  "curiosity, relief, status, visual satisfaction, emotional validation, or a",
-  "clean surprising product moment. It must specify: Scene, Subject, Product",
-  "placement, Mood, Camera style, Lighting, Composition, whether text overlay is",
-  "needed (and the one short overlay line if useful), Square 1:1 Meta ad format,",
-  "and a clear instruction to keep the image simple and scroll-stopping. Not",
-  "every image needs text — if the visual hook is strong, specify NO text",
-  "overlay; if text helps, use ONE short line only. Avoid fake before-and-after,",
-  "medical/clinical proof visuals, overcrowded compositions, long overlays, and",
-  "generic product photos when a stronger concept exists.",
+/** Rules injected into prompts — must not appear verbatim in model output image_prompt fields. */
+const IMAGE_PROMPT_RULE_LINES = [
+  "Each image_prompt must be ready to paste directly into ChatGPT image generation, designed for Facebook/Instagram audiences with a ~2-second attention span.",
+  "It must create an immediate dopamine hit through recognition, curiosity, relief, status, visual satisfaction, emotional validation, or a clean surprising product moment.",
+  "Specify: Scene, Subject, Product placement, Mood, Camera style, Lighting, Composition, whether text overlay is needed (and the one short overlay line if useful), Square 1:1 Meta ad format, and keep the image simple and scroll-stopping.",
+  "Not every image should have text. If the visual hook is strong, specify NO text overlay. If text helps, use ONE short line only.",
+  "Before/after style concepts are allowed when subtle, realistic, and not presented as guaranteed proof.",
+  "Medical or clinical-style settings are allowed when contextually relevant, but must not imply fake clinical evidence, diagnosis, treatment, medical claims, or guaranteed results.",
+  "Avoid shame-based framing, exaggerated transformation, overcrowded compositions, long overlays, and generic product photos when a stronger concept exists.",
+  "Do not include safety, compliance, avoidance, policy, or restriction wording inside the final image_prompt — write clean, paste-ready creative direction only.",
+  "Good visual formats: mirror pause moment; face routine vs forgotten neck/chest; clean bathroom skincare ritual; POV routine shot; product applicator close-up; premium flat lay; UGC-style phone photo; simple text-led ad with one punchy line; a polished outfit / neckline moment; a product hero that makes the built-in massage applicator obvious.",
 ];
+
+/** Flattened rules for regenerate prompts. */
+const IMAGE_PROMPT_RULES = IMAGE_PROMPT_RULE_LINES;
+
+function hasReviewerNotes(angle: MarketingAngle): boolean {
+  return Boolean(angle.reviewer_notes?.trim());
+}
+
+function reviewerNotesPromptLines(
+  angle: MarketingAngle,
+  scope: "pack" | "single" | "visual"
+): string[] {
+  const notes = angle.reviewer_notes?.trim() ?? "";
+  if (!notes) return [];
+
+  const packRequirement =
+    "At least 2 of the 5 ad variations must visibly reflect one of these reviewer note ideas in the visual_strategy and image_prompt.";
+  const singleRequirement =
+    "This ad must visibly reflect one of these reviewer note ideas in the visual_strategy and image_prompt where it fits the ad being replaced.";
+  const visualRequirement =
+    "The new visual_strategy and image_prompt must visibly reflect one of these reviewer note ideas where they fit the existing ad copy.";
+
+  const requirementLine =
+    scope === "pack"
+      ? packRequirement
+      : scope === "visual"
+        ? visualRequirement
+        : singleRequirement;
+
+  const diversityLine =
+    scope === "pack"
+      ? "Keep the full pack diverse. Do not force the notes into all 5 ads if that makes the pack repetitive."
+      : "Keep the concept distinct from the other ads in the pack while still honouring the notes.";
+
+  return [
+    "",
+    "Human reviewer notes for this specific angle:",
+    notes,
+    "",
+    "Reviewer note handling:",
+    "These notes are mandatory creative direction from the operator when provided.",
+    requirementLine,
+    "Use the notes mainly as visual and emotional direction, not as factual claims.",
+    diversityLine,
+    "You may soften or adapt the scenario so it feels realistic, subtle, premium, and suitable for a Meta ad.",
+    "Do not ignore these notes unless they directly conflict with truthfulness safeguards.",
+    "Do not turn these notes into medical claims, diagnosis, treatment claims, fake proof, or guaranteed results.",
+    "Write image_prompt as clean, paste-ready creative direction only — never label it with phrases like \"reviewer notes\", \"based on reviewer notes\", or other internal instructions.",
+  ];
+}
+
+function angleContextLines(
+  angle: MarketingAngle,
+  reviewerNotesScope: "pack" | "single" | "visual"
+): string[] {
+  return [
+    "Selected marketing angle:",
+    JSON.stringify(angle, null, 2),
+    ...reviewerNotesPromptLines(angle, reviewerNotesScope),
+  ];
+}
 
 function sharedContextLines(
   project: ProductProject,
   insight: ResearchInsight,
   avatar: CustomerAvatarContent,
   massDesire: MassDesire,
-  angle: MarketingAngle
+  angle: MarketingAngle,
+  reviewerNotesScope: "single" | "visual" = "single"
 ): string[] {
   return [
     "Product context:",
@@ -288,8 +346,7 @@ function sharedContextLines(
       2
     ),
     "",
-    "Selected marketing angle:",
-    JSON.stringify(angle, null, 2),
+    ...angleContextLines(angle, reviewerNotesScope),
     "",
     "Insight report (for customer language and emotion):",
     JSON.stringify(
@@ -316,19 +373,32 @@ function sharedContextLines(
 /** Call OpenAI and parse/validate JSON, retrying once on failure. */
 async function generateValidatedJson<T>(
   input: string,
-  parse: (value: unknown) => T
-): Promise<T> {
+  parse: (value: unknown) => T,
+  ctx: AiUsageLogContext
+): Promise<{ result: T; aiUsage: AiUsageSummary[] }> {
   const client = getOpenAI();
   let lastParseFailed = false;
   let lastValidationError: Error | null = null;
   let lastRawText = "";
+  const aiUsage: AiUsageSummary[] = [];
 
   for (let attempt = 1; attempt <= 2; attempt += 1) {
-    const response = await client.responses.create({
-      model: OPENAI_MODEL,
-      input,
-    });
-    const text = response.output_text ?? "";
+    const { text, summary } = await trackedResponsesCreate(
+      client,
+      {
+        ...ctx,
+        promptChars: input.length,
+        metadata: {
+          ...(ctx.metadata ?? {}),
+          attempt,
+        },
+      },
+      {
+        model: OPENAI_MODEL,
+        input,
+      }
+    );
+    aiUsage.push(summary);
     lastRawText = text;
 
     let parsed: unknown;
@@ -341,7 +411,7 @@ async function generateValidatedJson<T>(
     }
 
     try {
-      return parse(parsed);
+      return { result: parse(parsed), aiUsage };
     } catch (error: unknown) {
       lastValidationError =
         error instanceof Error ? error : new Error(String(error));
@@ -380,8 +450,9 @@ export async function regenerateAd(
   massDesire: MassDesire,
   angle: MarketingAngle,
   existingAds: AdVariation[],
-  adIndex: number
-): Promise<AdVariation> {
+  adIndex: number,
+  copySetId?: string
+): Promise<{ ad: AdVariation; aiUsage: AiUsageSummary[] }> {
   const replacing = existingAds[adIndex];
   const others = existingAds.filter((_, i) => i !== adIndex);
 
@@ -415,22 +486,38 @@ export async function regenerateAd(
     "Other ads in the pack (stay distinct from these):",
     JSON.stringify(others.map(copyFieldsOnly), null, 2),
     "",
-    ...sharedContextLines(project, insight, avatar, massDesire, angle),
+    ...sharedContextLines(project, insight, avatar, massDesire, angle, "single"),
     "",
     "Respond with VALID JSON ONLY (no markdown) in exactly this shape:",
     '{ "primary": "string", "headline": "string", "description": "string", "visual_strategy": "string", "image_prompt": "string" }',
   ].join("\n");
 
-  return generateValidatedJson(input, (parsed) => {
-    const ad = normalizeSingleAd(parsed);
-    const missing = (
-      ["primary", "headline", "description", "visual_strategy", "image_prompt"] as const
-    ).filter((field) => ad[field].trim().length === 0);
-    if (missing.length > 0) {
-      throw new Error(`Regenerated ad is missing: ${missing.join(", ")}.`);
+  const { result, aiUsage } = await generateValidatedJson(
+    input,
+    (parsed) => {
+      const ad = normalizeSingleAd(parsed);
+      const missing = (
+        ["primary", "headline", "description", "visual_strategy", "image_prompt"] as const
+      ).filter((field) => ad[field].trim().length === 0);
+      if (missing.length > 0) {
+        throw new Error(`Regenerated ad is missing: ${missing.join(", ")}.`);
+      }
+      return ad;
+    },
+    {
+      operation: "regenerate-ad",
+      projectId: project.id,
+      sourceRoute: "/api/copy/:copySetId/regenerate",
+      metadata: {
+        marketing_angle_id: angle.id,
+        mass_desire_id: massDesire.id,
+        copy_set_id: copySetId ?? null,
+        ad_index: adIndex,
+      },
     }
-    return ad;
-  });
+  );
+
+  return { ad: result, aiUsage };
 }
 
 /** Regenerate ONLY the visual strategy + image prompt for existing ad copy. */
@@ -440,8 +527,13 @@ export async function regenerateImagePrompt(
   avatar: CustomerAvatarContent,
   massDesire: MassDesire,
   angle: MarketingAngle,
-  ad: AdVariation
-): Promise<{ visual_strategy: string; image_prompt: string }> {
+  ad: AdVariation,
+  copySetId?: string,
+  adIndex?: number
+): Promise<{
+  visual: { visual_strategy: string; image_prompt: string };
+  aiUsage: AiUsageSummary[];
+}> {
   const input = [
     "Generate a NEW visual strategy and image prompt for the existing ad copy",
     "below. Do NOT change the primary, headline, or description — only produce a",
@@ -463,21 +555,37 @@ export async function regenerateImagePrompt(
       2
     ),
     "",
-    ...sharedContextLines(project, insight, avatar, massDesire, angle),
+    ...sharedContextLines(project, insight, avatar, massDesire, angle, "visual"),
     "",
     "Respond with VALID JSON ONLY (no markdown) in exactly this shape:",
     '{ "visual_strategy": "string", "image_prompt": "string" }',
   ].join("\n");
 
-  return generateValidatedJson(input, (parsed) => {
-    const r = asRecord(parsed);
-    const visual_strategy = toStringValue(r.visual_strategy);
-    const image_prompt = toStringValue(r.image_prompt);
-    if (visual_strategy.trim().length === 0 || image_prompt.trim().length === 0) {
-      throw new Error("Regenerated image prompt is incomplete.");
+  const { result, aiUsage } = await generateValidatedJson(
+    input,
+    (parsed) => {
+      const r = asRecord(parsed);
+      const visual_strategy = toStringValue(r.visual_strategy);
+      const image_prompt = toStringValue(r.image_prompt);
+      if (visual_strategy.trim().length === 0 || image_prompt.trim().length === 0) {
+        throw new Error("Regenerated image prompt is incomplete.");
+      }
+      return { visual_strategy, image_prompt };
+    },
+    {
+      operation: "regenerate-image-prompt",
+      projectId: project.id,
+      sourceRoute: "/api/copy/:copySetId/regenerate",
+      metadata: {
+        marketing_angle_id: angle.id,
+        mass_desire_id: massDesire.id,
+        copy_set_id: copySetId ?? null,
+        ad_index: adIndex ?? null,
+      },
     }
-    return { visual_strategy, image_prompt };
-  });
+  );
+
+  return { visual: result, aiUsage };
 }
 
 /**
@@ -520,51 +628,179 @@ export async function generateAdCopy(
   avatar: CustomerAvatarContent,
   massDesire: MassDesire,
   angle: MarketingAngle
-): Promise<AdCopyContent> {
+): Promise<{ content: AdCopyContent; aiUsage: AiUsageSummary[] }> {
+  const flowStartedAt = Date.now();
+  const logIds = {
+    project_id: project.id,
+    mass_desire_id: massDesire.id,
+    marketing_angle_id: angle.id,
+    operation: "generate-copy" as const,
+  };
+
+  console.log("[COPY] request received", logIds);
+  console.log(
+    "[COPY] reviewer notes included:",
+    Boolean(angle.reviewer_notes?.trim())
+  );
+
   const client = getOpenAI();
   const input = buildPrompt(project, insight, avatar, massDesire, angle);
-  const maxAttempts = 2;
+  console.log("[COPY] prompt built", {
+    ...logIds,
+    prompt_chars: input.length,
+    duration_ms: Date.now() - flowStartedAt,
+  });
 
+  const maxAttempts = 2;
+  const aiUsage: AiUsageSummary[] = [];
   let lastValidationError: Error | null = null;
   let lastParseFailed = false;
   let lastRawText = "";
+  let lastDebugRef: string | undefined;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const response = await client.responses.create({
-      model: OPENAI_MODEL,
-      input,
+    const attemptStartedAt = Date.now();
+    console.log("[COPY] OpenAI request starting", {
+      ...logIds,
+      attempt,
+      duration_ms: Date.now() - flowStartedAt,
     });
 
-    const text = response.output_text ?? "";
-    lastRawText = text;
+    let tracked;
+    try {
+      tracked = await trackedResponsesCreate(
+        client,
+        {
+          operation: "generate-copy",
+          projectId: project.id,
+          sourceRoute: "/api/copy/generate",
+          promptChars: input.length,
+          metadata: {
+            marketing_angle_id: angle.id,
+            mass_desire_id: massDesire.id,
+            attempt,
+          },
+        },
+        {
+          model: OPENAI_MODEL,
+          input,
+        },
+        { timeout: GENERATE_COPY_OPENAI_TIMEOUT_MS }
+      );
+    } catch (error: unknown) {
+      const details =
+        error instanceof Error ? error.message : "OpenAI request failed.";
+      console.error("[COPY] OpenAI request failed", {
+        ...logIds,
+        attempt,
+        duration_ms: Date.now() - flowStartedAt,
+        details,
+      });
+      throw new CopyGenerateError({
+        stage: "openai",
+        details,
+        aiUsageSummaries: aiUsage,
+        message: details,
+      });
+    }
+
+    aiUsage.push(tracked.summary);
+    lastRawText = tracked.text;
+
+    console.log("[COPY] OpenAI response received", {
+      ...logIds,
+      attempt,
+      openai_response_id: tracked.response.id ?? null,
+      model: tracked.summary.model,
+      response_chars: tracked.text.length,
+      duration_ms: Date.now() - attemptStartedAt,
+    });
+    console.log("[COPY] raw response chars", {
+      ...logIds,
+      response_chars: tracked.text.length,
+    });
+    console.log("[COPY] usage captured", {
+      ...logIds,
+      input_tokens: tracked.summary.input_tokens,
+      output_tokens: tracked.summary.output_tokens,
+      total_tokens: tracked.summary.total_tokens,
+      estimated_cost_usd: tracked.summary.estimated_cost_usd,
+    });
+
+    lastDebugRef = await saveGenerateCopyDebugResponse({
+      project_id: project.id,
+      mass_desire_id: massDesire.id,
+      marketing_angle_id: angle.id,
+      model: tracked.summary.model,
+      openai_response_id: tracked.response.id ?? null,
+      usage: aggregateAiUsage([tracked.summary]) ?? null,
+      raw_text: tracked.text,
+      attempt,
+    });
+
+    console.log("[COPY] JSON parse starting", {
+      ...logIds,
+      attempt,
+      debug_ref: lastDebugRef,
+    });
 
     let parsed: unknown;
     try {
-      parsed = extractJson(text);
+      parsed = extractJson(tracked.text);
       lastParseFailed = false;
+      console.log("[COPY] JSON parse success", {
+        ...logIds,
+        attempt,
+        duration_ms: Date.now() - flowStartedAt,
+      });
     } catch {
       lastParseFailed = true;
+      console.warn("[COPY] JSON parse failed", {
+        ...logIds,
+        attempt,
+        response_chars: tracked.text.length,
+      });
       continue;
     }
 
+    console.log("[COPY] validation starting", { ...logIds, attempt });
+
     try {
       const adVariations = validateCopyPack(parsed);
-      return buildContent(adVariations);
+      console.log("[COPY] validation success", {
+        ...logIds,
+        attempt,
+        duration_ms: Date.now() - flowStartedAt,
+      });
+      return { content: buildContent(adVariations), aiUsage };
     } catch (error: unknown) {
       lastValidationError =
         error instanceof Error ? error : new Error(String(error));
+      console.warn("[COPY] validation failed", {
+        ...logIds,
+        attempt,
+        details: lastValidationError.message,
+      });
     }
   }
 
   if (lastParseFailed) {
-    throw new ResearchParseError(
-      "OpenAI did not return valid JSON.",
-      lastRawText
-    );
+    throw new CopyGenerateError({
+      stage: "parse",
+      details: "OpenAI did not return valid JSON.",
+      aiUsageSummaries: aiUsage,
+      debugRef: lastDebugRef,
+      rawText: lastRawText,
+    });
   }
-  throw new Error(
-    lastValidationError
-      ? `Copy generation produced invalid output: ${lastValidationError.message} Please try again.`
-      : "Copy generation failed. Please try again."
-  );
+
+  throw new CopyGenerateError({
+    stage: "validation",
+    details: lastValidationError
+      ? `Copy generation produced invalid output: ${lastValidationError.message}`
+      : "Copy generation failed. Please try again.",
+    aiUsageSummaries: aiUsage,
+    debugRef: lastDebugRef,
+    rawText: lastRawText,
+  });
 }

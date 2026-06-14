@@ -172,9 +172,54 @@ export interface ResearchSourceDraft {
   useful_phrases: string[];
 }
 
+/** Token/cost summary returned by AI backend routes. */
+export type AiUsageSummary = {
+  operation: string;
+  model?: string | null;
+  input_tokens?: number;
+  output_tokens?: number;
+  total_tokens?: number;
+  cached_input_tokens?: number;
+  estimated_cost_usd?: number | null;
+  duration_ms?: number;
+};
+
+export type AiUsageSectionKey =
+  | "setup"
+  | "research"
+  | "insight_report"
+  | "customer_avatar"
+  | "strategy"
+  | "ads"
+  | "additional_content";
+
+export type WorkflowAiCostSummary = {
+  cost_usd: number;
+  total_tokens: number;
+  operations: string[];
+};
+
+export type ProjectAiUsageSummary = {
+  project_id: string;
+  total_cost_usd: number;
+  total_tokens: number;
+  sections: Record<AiUsageSectionKey, WorkflowAiCostSummary>;
+};
+
+export type ProjectAiCostTotal = {
+  project_id: string;
+  total_cost_usd: number;
+  total_tokens: number;
+};
+
+export type ProjectAiCostTotalsResponse = {
+  projects: ProjectAiCostTotal[];
+};
+
 export interface RunResearchResponse {
   run: ResearchRun;
   sources: ResearchSource[];
+  ai_usage?: AiUsageSummary;
 }
 
 export type EmotionalIntensity = "low" | "medium" | "high";
@@ -232,6 +277,7 @@ export interface ResearchInsight extends ResearchInsightReport {
 
 export interface GenerateInsightResponse {
   insight: ResearchInsight;
+  ai_usage?: AiUsageSummary;
 }
 
 export interface CustomerAvatarDemographics {
@@ -309,6 +355,7 @@ export interface CustomerAvatarOutput {
 
 export interface GenerateAvatarResponse {
   avatar: CustomerAvatarOutput;
+  ai_usage?: AiUsageSummary;
 }
 
 /** Mass desire fields produced by OpenAI (before DB metadata). */
@@ -422,6 +469,7 @@ export interface MassDesireWithAngles {
 
 export interface GenerateAnglesResponse {
   desires: MassDesireWithAngles[];
+  ai_usage?: AiUsageSummary;
 }
 
 export interface PrimaryTextVariant {
@@ -522,6 +570,22 @@ export interface AdCopySet extends AdCopyContent {
 
 export interface GenerateCopyResponse {
   copySet: AdCopySet;
+  ai_usage?: AiUsageSummary;
+}
+
+export interface CopyGenerateErrorResponse {
+  error: string;
+  stage:
+    | "openai"
+    | "parse"
+    | "validation"
+    | "save"
+    | "response"
+    | "unknown";
+  status: number;
+  details: string;
+  ai_usage?: AiUsageSummary;
+  debug_ref?: string;
 }
 
 export interface UpdateCopyResponse {
@@ -534,6 +598,7 @@ export interface FixImageFilenameResponse {
 
 export interface RegenerateCopyResponse {
   copySet: AdCopySet;
+  ai_usage?: AiUsageSummary;
 }
 
 export interface CreativeConcept {
@@ -649,6 +714,7 @@ export interface TofConceptDraft {
 
 export interface GenerateTofConceptsResponse {
   conceptSet: DesireConceptSet;
+  ai_usage?: AiUsageSummary;
 }
 
 /* ------------------------------------------------------------------ */
