@@ -1,5 +1,14 @@
 import OpenAI from "openai";
-import type { ProductProject, ResearchSourceDraft } from "../src/types";
+import type {
+  ProductProject,
+  ResearchSource,
+  ResearchSourceDraft,
+} from "../src/types";
+import {
+  RESEARCH_BATCH_SIZE,
+  buildThemeCoverageSummary,
+  formatExistingSourcesForPrompt,
+} from "./research-helpers";
 import {
   type AiUsageLogContext,
   type AiUsageSummary,
@@ -7,7 +16,6 @@ import {
   normalizeOpenAiUsage,
   estimateOpenAiCostUsd,
   buildAiUsageSummary,
-  trackedResponsesCreate,
 } from "./ai-usage";
 
 /**
@@ -16,8 +24,19 @@ import {
  */
 export const OPENAI_MODEL = "gpt-5.5";
 
-/** Number of research sources to gather per run. */
-export const RESEARCH_SOURCE_COUNT = 10;
+/** Number of research sources to gather per batch. */
+export { RESEARCH_BATCH_SIZE };
+/** @deprecated Use RESEARCH_BATCH_SIZE — kept for backwards compatibility. */
+export const RESEARCH_SOURCE_COUNT = RESEARCH_BATCH_SIZE;
+
+export type ResearchRunMode = "initial" | "append";
+
+export interface RunResearchOptions {
+  mode?: ResearchRunMode;
+  batchSize?: number;
+  existingSources?: ResearchSource[];
+  researchRunId?: string | null;
+}
 
 /** Error thrown when the model response cannot be parsed as the expected JSON. */
 export class ResearchParseError extends Error {
@@ -251,8 +270,18 @@ export async function callOpenAIWithRetry(
   );
 }
 
-function buildPrompt(project: ProductProject): string {
-  return [
+function buildPrompt(
+  project: ProductProject,
+  options: {
+    mode: ResearchRunMode;
+    batchSize: number;
+    existingSources: ResearchSource[];
+  }
+): string {
+  const { mode, batchSize, existingSources } = options;
+  const isAppend = mode === "append" && existingSources.length > 0;
+
+  const lines = [
     "You are a customer research analyst for direct-response ecommerce.",
     "",
     "Use the web_search tool to find REAL, public online discussions where",
@@ -260,11 +289,9 @@ function buildPrompt(project: ProductProject): string {
     "Look at sources like Reddit, forums, Quora, blog comments, review threads,",
     "and social posts.",
     "",
-    `Find exactly ${RESEARCH_SOURCE_COUNT} high-quality sources. Return exactly`,
-    `${RESEARCH_SOURCE_COUNT} — never fewer, never filler. Every source must be`,
-    "a genuine, distinct, high-relevance source. Do NOT pad the list with weak or",
-    "duplicate sources just to reach the count; instead keep searching until you",
-    `have ${RESEARCH_SOURCE_COUNT} strong ones.`,
+    isAppend
+      ? `Find exactly ${batchSize} additional high-quality sources not already collected. Return exactly ${batchSize} — never fewer, never filler. Every source must be a genuine, distinct, high-relevance source that adds NEW signal beyond what is already collected.`
+      : `Find exactly ${batchSize} high-quality sources. Return exactly ${batchSize} — never fewer, never filler. Every source must be a genuine, distinct, high-relevance source. Do NOT pad the list with weak or duplicate sources just to reach the count; instead keep searching until you have ${batchSize} strong ones.`,
     "",
     "Focus ONLY on the human, emotional layer of the underlying problem:",
     "- emotional pain, frustration, fear, anxiety",
@@ -272,18 +299,12 @@ function buildPrompt(project: ProductProject): string {
     "- failed solutions they have already tried",
     "- rock-bottom / breaking-point moments",
     "",
-    `Aim for a useful SPREAD across the ${RESEARCH_SOURCE_COUNT} sources, covering`,
-    "(combine where a single strong source covers several):",
+    `Aim for a useful SPREAD across the ${batchSize} sources, covering:`,
     "1. Strongest pain point source",
     "2. Strongest customer language / verbatim phrasing source",
     "3. Failed solutions source",
-    "4. Emotional insecurity source",
-    "5. Competitor or category positioning source",
-    "6. Price or affordability source (if relevant to this market)",
-    "7. Routine or usage behaviour source",
-    "8. Visual / creative inspiration source",
-    "9. Objection or skepticism source",
-    "10. Additional high-relevance market pain source",
+    "4. Emotional insecurity or objection source",
+    "5. Price, routine, visual inspiration, or additional high-relevance pain",
     "",
     "Strict rules:",
     "- Research the UNDERLYING PROBLEM, not this specific product.",
@@ -298,6 +319,32 @@ function buildPrompt(project: ProductProject): string {
     "- Only use real URLs you actually found via web_search. Never invent URLs.",
     "- relevance_score is an integer from 0 to 100.",
     "- useful_phrases must be short verbatim-style phrases real people use.",
+  ];
+
+  if (isAppend) {
+    lines.push(
+      "",
+      "Existing sources already collected:",
+      formatExistingSourcesForPrompt(existingSources),
+      "",
+      "Do NOT return these URLs again.",
+      "Do NOT return near-duplicate versions of the same thread/article.",
+      "Prefer new URLs, new discussions, new language, new objections, new failed",
+      "solutions, or stronger examples.",
+      "If a theme already appears, only include another source if it adds",
+      "meaningfully better customer language or a different angle.",
+      "",
+      "Themes already found:",
+      buildThemeCoverageSummary(existingSources),
+      "",
+      "Find gaps or deepen weak areas.",
+      "Prioritise sources that add new useful customer language, new objections,",
+      "new failed solutions, price anxiety, routine behaviour, visual inspiration,",
+      "or emotional breaking points."
+    );
+  }
+
+  lines.push(
     "",
     "Research context (DO NOT search for the product name):",
     `- supplier_product_description: ${project.supplier_product_description}`,
@@ -322,7 +369,9 @@ function buildPrompt(project: ProductProject): string {
     "    }",
     "  ]",
     "}",
-  ].join("\n");
+  );
+
+  return lines.join("\n");
 }
 
 /** Pull a JSON object out of a model response that may be wrapped in prose/fences. */
@@ -397,27 +446,51 @@ function normalizeSources(parsed: unknown): ResearchSourceDraft[] {
  */
 export async function runResearchForProject(
   project: ProductProject,
-  researchRunId?: string | null
+  options: RunResearchOptions | string | null = {}
 ): Promise<{
   drafts: ResearchSourceDraft[];
   aiUsage: AiUsageSummary[];
 }> {
-  const client = getOpenAI();
-  const input = buildPrompt(project);
+  const resolved: RunResearchOptions =
+    typeof options === "string" || options === null
+      ? { mode: "initial", researchRunId: options ?? undefined }
+      : options;
 
-  const { text, summary } = await trackedResponsesCreate(
-    client,
+  const mode = resolved.mode ?? "initial";
+  const batchSize = resolved.batchSize ?? RESEARCH_BATCH_SIZE;
+  const existingSources = resolved.existingSources ?? [];
+
+  const client = getOpenAI();
+  const input = buildPrompt(project, { mode, batchSize, existingSources });
+
+  const { text, summaries } = await callOpenAIWithRetry(
+    "research",
+    (signal) =>
+      client.responses.create(
+        {
+          model: OPENAI_MODEL,
+          tools: [{ type: "web_search" }],
+          input,
+        },
+        { signal }
+      ),
     {
-      operation: "research",
-      projectId: project.id,
-      sourceRoute: "/api/research/run",
-      promptChars: input.length,
-      metadata: researchRunId ? { research_run_id: researchRunId } : undefined,
-    },
-    {
-      model: OPENAI_MODEL,
-      tools: [{ type: "web_search" }],
-      input,
+      timeoutMs: 240_000,
+      maxAttempts: 3,
+      usageContext: {
+        operation: "research",
+        projectId: project.id,
+        sourceRoute: "/api/research/run",
+        promptChars: input.length,
+        metadata: {
+          ...(resolved.researchRunId
+            ? { research_run_id: resolved.researchRunId }
+            : {}),
+          mode,
+          batch_size: batchSize,
+          existing_source_count: existingSources.length,
+        },
+      },
     }
   );
 
@@ -433,6 +506,6 @@ export async function runResearchForProject(
 
   return {
     drafts: normalizeSources(parsed),
-    aiUsage: [summary],
+    aiUsage: summaries,
   };
 }

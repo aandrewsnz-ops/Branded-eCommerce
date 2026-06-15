@@ -1,3 +1,8 @@
+import {
+  normalizeOptionalString,
+  normalizeOptionalTimestamp,
+} from "./lib/projectSetupFields";
+
 export interface ProductProject {
   id: string;
 
@@ -15,6 +20,14 @@ export interface ProductProject {
   initial_problem_hypothesis: string;
   initial_customer_hypothesis: string;
   preferred_tone: string;
+
+  /* ---- Your store branding (Preview Ads — not used in research prompts) ---- */
+  your_store_name?: string | null;
+  your_store_url?: string | null;
+  your_store_logo_url?: string | null;
+  your_store_logo_path?: string | null;
+  your_store_logo_filename?: string | null;
+  your_store_logo_uploaded_at?: string | null;
 
   /* ---- Legacy columns (kept for backwards compatibility; not deleted) ---- */
   product_name?: string;
@@ -47,6 +60,8 @@ export interface ProductProjectInput {
   initial_problem_hypothesis: string;
   initial_customer_hypothesis: string;
   preferred_tone: string;
+  your_store_name: string;
+  your_store_url: string;
 }
 
 function firstNonEmpty(...values: (string | undefined | null)[]): string {
@@ -104,6 +119,16 @@ export function normalizeProject(raw: ProductProject): ProductProject {
     initial_problem_hypothesis,
     initial_customer_hypothesis,
     preferred_tone,
+    your_store_name: raw.your_store_name ?? "",
+    your_store_url: raw.your_store_url ?? "",
+    your_store_logo_url: normalizeOptionalString(raw.your_store_logo_url),
+    your_store_logo_path: normalizeOptionalString(raw.your_store_logo_path),
+    your_store_logo_filename: normalizeOptionalString(
+      raw.your_store_logo_filename
+    ),
+    your_store_logo_uploaded_at: normalizeOptionalTimestamp(
+      raw.your_store_logo_uploaded_at
+    ),
 
     // Back-fill legacy field names for prompt code that still reads them.
     product_name: our_product_name,
@@ -219,6 +244,10 @@ export type ProjectAiCostTotalsResponse = {
 export interface RunResearchResponse {
   run: ResearchRun;
   sources: ResearchSource[];
+  new_sources?: ResearchSource[];
+  total_sources?: number;
+  mode?: "initial" | "append";
+  warning?: string;
   ai_usage?: AiUsageSummary;
 }
 
@@ -684,6 +713,11 @@ export interface DesireConcept {
   visual_strategy: string;
   rationale: string;
   image_prompt: string;
+  image_url?: string | null;
+  image_path?: string | null;
+  image_filename?: string | null;
+  image_uploaded_at?: string | null;
+  image_file_type?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -703,12 +737,10 @@ export interface DesireConceptSet {
 
 /** Content shape returned by OpenAI before DB persistence. */
 export interface TofConceptDraft {
-  concept_title: string;
+  primary: string;
   headline: string;
-  support_line: string;
-  overlay_recommendation: TofOverlayRecommendation;
+  description: string;
   visual_strategy: string;
-  rationale: string;
   image_prompt: string;
 }
 

@@ -7,7 +7,7 @@ import {
   getOperationMaxSeconds,
   type AiOperation,
 } from "../lib/aiProgress";
-import { formatCopyFailureStage, type CopyFailureStage } from "../lib/copyGenerateErrors";
+import { formatAiFailureStage, type AiFailureStage } from "../lib/aiFailureStage";
 import {
   formatDurationMs,
   formatTokenCount,
@@ -22,7 +22,7 @@ export interface AiProgressOverlayProps {
   status: AiOverlayStatus;
   startedAt: number;
   usage?: AiUsageSummary | null;
-  errorStage?: CopyFailureStage | null;
+  errorStage?: AiFailureStage | null;
   errorDetails?: string | null;
   onContinue?: () => void;
 }
@@ -55,6 +55,11 @@ export function AiProgressOverlay({
   const isOvertime = elapsedSec >= maxSeconds;
   const activeStep = getActiveStepIndex(elapsedSec);
   const progressPct = Math.min(100, (elapsedSec / maxSeconds) * 100);
+  const showExtendedWait =
+    isRunning &&
+    config.extendedWaitAfterSeconds != null &&
+    elapsedSec >= config.extendedWaitAfterSeconds &&
+    !isOvertime;
 
   const hasUsage =
     usage != null &&
@@ -85,7 +90,7 @@ export function AiProgressOverlay({
     ? config.description
     : isError
       ? (errorDetails?.trim() ||
-          "The request failed before the copy pack could be saved.")
+          "The research request failed before results could be saved.")
       : "The AI response was received, validated, and saved.";
 
   return (
@@ -124,12 +129,15 @@ export function AiProgressOverlay({
             <h2 id="ai-progress-title" className="ai-progress-title">
               {title}
             </h2>
-            <p id="ai-progress-desc" className="ai-progress-desc">
+            <p
+              id="ai-progress-desc"
+              className={`ai-progress-desc${isError ? " is-pre-line" : ""}`}
+            >
               {description}
             </p>
             {isError && errorStage ? (
               <p className="ai-progress-error-stage" role="status">
-                Stage: {formatCopyFailureStage(errorStage)}
+                Stage: {formatAiFailureStage(errorStage)}
               </p>
             ) : null}
           </div>
@@ -182,6 +190,10 @@ export function AiProgressOverlay({
                 Still working… This is taking longer than expected. The request
                 may still complete, but if it fails the app will show the error
                 here.
+              </p>
+            ) : showExtendedWait && config.extendedWaitMessage ? (
+              <p className="ai-progress-overtime" role="status">
+                {config.extendedWaitMessage}
               </p>
             ) : (
               <p className="ai-progress-reassurance">{config.reassurance}</p>

@@ -3,6 +3,7 @@ import type {
   AdCandidate,
   AdCandidatePatch,
   AdCopySet,
+  AdVariation,
   AngleReviewPatch,
   CreativePromptSet,
   CustomerAvatarOutput,
@@ -16,6 +17,7 @@ import type {
   ResearchInsight,
   ResearchSource,
 } from "../types";
+import type { ProductProjectUpdate } from "../lib/projectSetupFields";
 import type { ModeStatus, WorkflowMode } from "./workflow";
 import { LeftRail } from "./LeftRail";
 import { SetupWorkspace } from "./SetupWorkspace";
@@ -24,6 +26,8 @@ import { InsightReportWorkspace } from "./InsightReportWorkspace";
 import { CustomerAvatarWorkspace } from "./CustomerAvatarWorkspace";
 import { StrategyWorkspace } from "./StrategyWorkspace";
 import { AdsWorkspace } from "./AdsWorkspace";
+import { ViewAdsWorkspace } from "./ViewAdsWorkspace";
+import { PublishAdsWorkspace } from "./PublishAdsWorkspace";
 import { AdditionalContentWorkspace } from "./AdditionalContentWorkspace";
 
 export interface AppShellProps {
@@ -43,6 +47,10 @@ export interface AppShellProps {
   onCreateProject: (event: React.FormEvent<HTMLFormElement>) => void;
   isCreating: boolean;
   createError: string | null;
+
+  isSavingSetup: boolean;
+  setupError: string | null;
+  onSaveSetup: (patch: ProductProjectUpdate) => Promise<void>;
 
   // Mode
   mode: WorkflowMode;
@@ -66,6 +74,7 @@ export interface AppShellProps {
   isResearching: boolean;
   isSourcesLoading: boolean;
   researchError: string | null;
+  newResearchSourceIds: ReadonlySet<string>;
   isGeneratingInsight: boolean;
   isInsightLoading: boolean;
   insightError: string | null;
@@ -103,11 +112,19 @@ export interface AppShellProps {
   onUpsertCandidate: (angleId: string, patch: AdCandidatePatch) => void;
   onPatchCandidate: (id: string, patch: AdCandidatePatch) => void;
   onOpenCopyPack: (copySet: AdCopySet, angleName: string) => void;
+  onSaveCopyPack: (
+    copySet: AdCopySet,
+    adVariations: AdVariation[]
+  ) => Promise<AdCopySet>;
   onFixImageFilename: (
     copySetId: string,
     adIndex: number,
     safeFilename: string
   ) => Promise<AdCopySet>;
+  onUpdateTofConceptCopy: (
+    conceptId: string,
+    copy: { primary: string; headline: string; description: string }
+  ) => Promise<void>;
 
   projectAiUsage: ProjectAiUsageSummary | null;
   projectCostById: Record<string, ProjectAiCostTotal>;
@@ -132,7 +149,14 @@ export function AppShell(props: AppShellProps) {
 
     switch (mode) {
       case "setup":
-        return <SetupWorkspace project={selectedProject} />;
+        return (
+          <SetupWorkspace
+            project={selectedProject}
+            isSaving={props.isSavingSetup}
+            saveError={props.setupError}
+            onSave={(patch) => props.onSaveSetup(patch)}
+          />
+        );
       case "research":
         return (
           <ResearchWorkspace
@@ -140,6 +164,7 @@ export function AppShell(props: AppShellProps) {
             isResearching={props.isResearching}
             isLoading={props.isSourcesLoading}
             error={props.researchError}
+            newSourceIds={props.newResearchSourceIds}
             onRunResearch={props.onRunResearch}
           />
         );
@@ -147,7 +172,7 @@ export function AppShell(props: AppShellProps) {
         return (
           <InsightReportWorkspace
             insight={props.insight}
-            hasResearch={props.sources.length > 0}
+            hasResearch={props.sources.length >= 5}
             isGeneratingInsight={props.isGeneratingInsight}
             isInsightLoading={props.isInsightLoading}
             insightError={props.insightError}
@@ -198,7 +223,31 @@ export function AppShell(props: AppShellProps) {
             angles={props.angles}
             copySets={props.copySets}
             onGoToStrategy={() => props.onChangeMode("strategy")}
+            onSaveCopyPack={props.onSaveCopyPack}
             onFixImageFilename={props.onFixImageFilename}
+          />
+        );
+      case "view_ads":
+        return (
+          <ViewAdsWorkspace
+            project={selectedProject}
+            desires={props.desires}
+            angles={props.angles}
+            copySets={props.copySets}
+            conceptSets={props.conceptSets}
+            onGoToReviewAds={() => props.onChangeMode("ads")}
+            onSaveCopyPack={props.onSaveCopyPack}
+            onUpdateTofConceptCopy={props.onUpdateTofConceptCopy}
+          />
+        );
+      case "publish_ads":
+        return (
+          <PublishAdsWorkspace
+            key={selectedProject.id}
+            desires={props.desires}
+            angles={props.angles}
+            copySets={props.copySets}
+            onGoToReviewAds={() => props.onChangeMode("ads")}
           />
         );
       case "additional":

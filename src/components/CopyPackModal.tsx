@@ -440,7 +440,9 @@ export function CopyPackModal({
         <div className="modal-body">
           {ads.length > 0 ? (
             <div className="copy-pack-ads">
-              {ads.map((ad, i) => (
+              {ads.map((ad, i) => {
+                const naming = resolveAdNaming(desires, angles, copySet, ad, i);
+                return (
                 <article
                   key={i}
                   className={`copy-pack-ad${ad.locked ? " is-locked" : ""}${
@@ -449,7 +451,7 @@ export function CopyPackModal({
                 >
                   <div className="copy-pack-ad-head">
                     <div className="copy-pack-ad-title-row">
-                      <h4 className="copy-pack-ad-title">Ad {i + 1}</h4>
+                      <h4 className="copy-pack-ad-title">{naming.adName}</h4>
                       {ad.is_winner ? (
                         <span className="copy-pack-winner-badge">
                           <Trophy size={11} /> Winner
@@ -643,17 +645,15 @@ export function CopyPackModal({
                         adIndex={i}
                         ad={ad}
                         projectId={copySet.project_id}
-                        safeFilename={
-                          resolveAdNaming(desires, angles, copySet, ad, i)
-                            .safeFilename
-                        }
+                        safeFilename={naming.safeFilename}
                         disabled={editing || busy !== null}
                         onUpdate={(updatedAd) => handleAdImageUpdate(i, updatedAd)}
                       />
                     </div>
                   </div>
                 </article>
-              ))}
+              );
+              })}
             </div>
           ) : (
             <p className="copy-pack-empty">This copy pack has no ad variations.</p>

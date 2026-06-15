@@ -1,5 +1,6 @@
 export type AiOperation =
   | "research"
+  | "research_append"
   | "insight_report"
   | "customer_avatar"
   | "marketing_angles"
@@ -13,10 +14,17 @@ export const AI_PROGRESS_MAX_SECONDS = 90;
 /** Longer estimate for copy pack generation (no client abort — proxy/backend may run ~4 min). */
 export const AI_PROGRESS_MAX_SECONDS_GENERATE_COPY = 240;
 
+/** Research uses web search and may run up to ~4 minutes. */
+export const AI_PROGRESS_MAX_SECONDS_RESEARCH = 240;
+
 export function getOperationMaxSeconds(operation: AiOperation): number {
-  return operation === "generate_copy"
-    ? AI_PROGRESS_MAX_SECONDS_GENERATE_COPY
-    : AI_PROGRESS_MAX_SECONDS;
+  if (operation === "generate_copy") {
+    return AI_PROGRESS_MAX_SECONDS_GENERATE_COPY;
+  }
+  if (operation === "research" || operation === "research_append") {
+    return AI_PROGRESS_MAX_SECONDS_RESEARCH;
+  }
+  return AI_PROGRESS_MAX_SECONDS;
 }
 
 export interface AiOperationConfig {
@@ -26,6 +34,8 @@ export interface AiOperationConfig {
   errorTitle?: string;
   description: string;
   reassurance: string;
+  extendedWaitAfterSeconds?: number;
+  extendedWaitMessage?: string;
   technicalDetail: string;
   steps: readonly [string, string, string, string, string];
 }
@@ -35,10 +45,14 @@ export const AI_OPERATION_CONFIG: Record<AiOperation, AiOperationConfig> = {
     id: "research",
     title: "Running research",
     successTitle: "Research complete",
+    errorTitle: "Research failed",
     description:
-      "Searching public discussions and extracting useful source evidence for this product.",
+      "Searching public discussions and extracting the first 5 useful sources.",
     reassurance:
-      "Research runs in the background — large language models need time to search and structure findings.",
+      "Typical timing: 1 to 3 minutes. Long web search runs may take up to 4 minutes.",
+    extendedWaitAfterSeconds: 90,
+    extendedWaitMessage:
+      "Still working. Research can take longer because the AI is searching the web and returning structured source evidence.",
     technicalDetail: "Web search plus structured JSON source extraction",
     steps: [
       "Preparing product context",
@@ -46,6 +60,27 @@ export const AI_OPERATION_CONFIG: Record<AiOperation, AiOperationConfig> = {
       "Waiting for AI research response",
       "Parsing research sources",
       "Saving research results",
+    ],
+  },
+  research_append: {
+    id: "research_append",
+    title: "Fetching another 5 sources",
+    successTitle: "Research sources updated",
+    errorTitle: "Research fetch failed",
+    description:
+      "Looking for new discussions while avoiding sources already collected.",
+    reassurance:
+      "Typical timing: 1 to 3 minutes. Long web search runs may take up to 4 minutes.",
+    extendedWaitAfterSeconds: 90,
+    extendedWaitMessage:
+      "Still working. Research can take longer because the AI is searching the web and returning structured source evidence.",
+    technicalDetail: "Web search with existing-source avoidance",
+    steps: [
+      "Loading saved research sources",
+      "Sending follow-up research request",
+      "Waiting for AI research response",
+      "Parsing new sources",
+      "Saving additional results",
     ],
   },
   insight_report: {
@@ -153,19 +188,20 @@ export const AI_OPERATION_CONFIG: Record<AiOperation, AiOperationConfig> = {
   },
   tof_concepts: {
     id: "tof_concepts",
-    title: "Generating TOF concepts",
-    successTitle: "TOF concepts generated",
+    title: "Generating TOF copy pack",
+    successTitle: "TOF copy pack generated",
+    errorTitle: "TOF copy pack generation failed",
     description:
-      "Creating three broader visual-first top-of-funnel ad concepts for this mass desire.",
+      "Creating three desire-level Meta ad units anchored on this mass desire.",
     reassurance:
-      "TOF concepts are image-first awareness ideas — broader than angle-level copy packs.",
+      "Desire-level copy is broader than angle ads but still ready to use as Meta ad units.",
     technicalDetail: "Compact prompt and structured JSON response",
     steps: [
       "Preparing desire context",
-      "Sending concept prompt",
-      "Waiting for AI concept response",
-      "Validating concept structure",
-      "Saving concepts",
+      "Sending copy prompt",
+      "Waiting for AI response",
+      "Validating ad structure",
+      "Saving copy pack",
     ],
   },
 };

@@ -1,72 +1,83 @@
-import { useMemo } from "react";
-import { ImageIcon, X } from "lucide-react";
-import type { DesireConcept, DesireConceptSet } from "../types";
+import { useEffect, useMemo, useState } from "react";
+import { X } from "lucide-react";
+import type { DesireConcept, DesireConceptSet, MassDesire } from "../types";
+import {
+  formatAllTofAds,
+  formatTofFullAd,
+  resolveTofAd,
+} from "../lib/tofAdFields";
+import { resolveTofNaming } from "../lib/tofNaming";
+import { TofImageUpload } from "./TofImageUpload";
 import { CopyButton } from "./shared";
 
 interface TofConceptModalProps {
   conceptSet: DesireConceptSet;
+  desires: MassDesire[];
   desireTitle: string;
   product?: string;
   offer?: string;
+  onUpdateConcept: (concept: DesireConcept) => Promise<DesireConcept>;
   onClose: () => void;
 }
 
-function overlayLabel(value: DesireConcept["overlay_recommendation"]): string {
-  switch (value) {
-    case "headline_only":
-      return "Headline only";
-    case "headline_plus_support_line":
-      return "Headline + support line";
-    default:
-      return "None";
-  }
-}
-
-function formatFullConcept(concept: DesireConcept): string {
-  const lines = [
-    `Concept: ${concept.concept_title}`,
-    `Headline: ${concept.headline}`,
-  ];
-  if (concept.support_line.trim()) {
-    lines.push(`Support line: ${concept.support_line}`);
-  }
-  lines.push(
-    `Overlay: ${overlayLabel(concept.overlay_recommendation)}`,
-    `Visual strategy: ${concept.visual_strategy}`,
-    `Rationale: ${concept.rationale}`,
-    `Image prompt: ${concept.image_prompt}`
+function ReadField({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="copy-pack-field">
+      <span className="copy-pack-label">{label}</span>
+      <p className="copy-pack-value">{value || "—"}</p>
+    </div>
   );
-  return lines.join("\n");
-}
-
-function formatAllConcepts(concepts: DesireConcept[]): string {
-  return concepts
-    .map((concept, index) => {
-      const header = `--- Concept ${index + 1} ---`;
-      return `${header}\n${formatFullConcept(concept)}`;
-    })
-    .join("\n\n");
 }
 
 export function TofConceptModal({
   conceptSet,
+  desires,
   desireTitle,
   product,
   offer,
+  onUpdateConcept,
   onClose,
 }: TofConceptModalProps) {
-  const concepts = useMemo(
-    () =>
-      [...conceptSet.concepts].sort(
-        (a, b) => a.concept_number - b.concept_number
-      ),
-    [conceptSet.concepts]
+  const [concepts, setConcepts] = useState(() =>
+    [...conceptSet.concepts].sort((a, b) => a.concept_number - b.concept_number)
+  );
+  const [savingConceptId, setSavingConceptId] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setConcepts(
+      [...conceptSet.concepts].sort((a, b) => a.concept_number - b.concept_number)
+    );
+  }, [conceptSet]);
+
+  const massDesireIndex = useMemo(() => {
+    const sorted = [...desires].sort((a, b) => a.sort_order - b.sort_order);
+    const index = sorted.findIndex((d) => d.id === conceptSet.mass_desire_id);
+    return Math.max(index, 0);
+  }, [desires, conceptSet.mass_desire_id]);
+
+  const allAdsText = useMemo(
+    () => formatAllTofAds(concepts, desireTitle),
+    [concepts, desireTitle]
   );
 
-  const allConceptsText = useMemo(
-    () => formatAllConcepts(concepts),
-    [concepts]
-  );
+  async function handleConceptImageUpdate(updated: DesireConcept) {
+    setSaveError(null);
+    setSavingConceptId(updated.id);
+    try {
+      const saved = await onUpdateConcept(updated);
+      setConcepts((prev) =>
+        prev.map((concept) => (concept.id === saved.id ? saved : concept))
+      );
+    } catch (err: unknown) {
+      setSaveError(
+        err instanceof Error ? err.message : "Failed to save TOF image."
+      );
+      throw err;
+    } finally {
+      setSavingConceptId(null);
+    }
+  }
 
   return (
     <div
@@ -76,14 +87,14 @@ export function TofConceptModal({
       aria-labelledby="tof-modal-title"
       onClick={onClose}
     >
-      <div className="modal-card modal-card-tof" onClick={(e) => e.stopPropagation()}>
+      <div className="modal-card" onClick={(e) => e.stopPropagation()}>
         <header className="modal-head">
           <div>
             <h2 id="tof-modal-title" className="modal-title">
-              Top of Funnel Concepts
+              TOF Copy Pack
             </h2>
             <p className="modal-subtitle">
-              Broad, image-first Meta concepts for scroll-stopping awareness.
+              Complete Meta ad units anchored on the mass desire.
             </p>
             <dl className="modal-context">
               <div>
@@ -115,83 +126,84 @@ export function TofConceptModal({
         </header>
 
         <div className="modal-toolbar">
-          <CopyButton text={allConceptsText} label="Copy All Concepts" />
+          <CopyButton text={allAdsText} label="Copy All Ads" />
         </div>
 
+        {saveError ? (
+          <div className="modal-banner modal-banner-error" role="alert">
+            {saveError}
+          </div>
+        ) : null}
+
         <div className="modal-body">
-          <div className="tof-concept-list">
-            {concepts.map((concept) => (
-              <article
-                key={concept.id}
-                className="tof-concept-card"
-              >
-                <header className="tof-concept-head">
-                  <span className="tof-concept-number">
-                    Concept {concept.concept_number}
-                  </span>
-                  <h3 className="tof-concept-title">{concept.concept_title}</h3>
-                </header>
+          <div className="copy-pack-ads">
+            {concepts.map((concept, index) => {
+              const ad = resolveTofAd(concept);
+              const naming = resolveTofNaming(concept, massDesireIndex, index);
+              const busy = savingConceptId === concept.id;
 
-                <div className="tof-concept-fields">
-                  <div className="tof-field">
-                    <span className="tof-field-label">Headline</span>
-                    <p className="tof-field-value">{concept.headline}</p>
-                  </div>
-                  {concept.support_line.trim() ? (
-                    <div className="tof-field">
-                      <span className="tof-field-label">Support line</span>
-                      <p className="tof-field-value">{concept.support_line}</p>
+              return (
+                <article
+                  key={concept.id}
+                  className={`copy-pack-ad${busy ? " is-busy" : ""}`}
+                >
+                  <div className="copy-pack-ad-head">
+                    <div className="copy-pack-ad-title-row">
+                      <h4 className="copy-pack-ad-title">{naming.adName}</h4>
                     </div>
-                  ) : null}
-                  <div className="tof-field">
-                    <span className="tof-field-label">Overlay recommendation</span>
-                    <p className="tof-field-value">
-                      {overlayLabel(concept.overlay_recommendation)}
-                    </p>
+                    <div className="copy-pack-ad-actions">
+                      <CopyButton
+                        text={ad.primary}
+                        label="Copy Primary"
+                        variant="primary"
+                      />
+                      <CopyButton
+                        text={ad.headline}
+                        label="Copy Headline"
+                        variant="headline"
+                      />
+                      <CopyButton
+                        text={ad.description}
+                        label="Copy Description"
+                        variant="description"
+                      />
+                      <CopyButton
+                        text={ad.image_prompt}
+                        label="Copy Image Prompt"
+                      />
+                      <CopyButton
+                        text={formatTofFullAd(ad)}
+                        label="Copy Full Ad"
+                      />
+                    </div>
                   </div>
-                  <div className="tof-field">
-                    <span className="tof-field-label">Visual strategy</span>
-                    <p className="tof-field-value">{concept.visual_strategy}</p>
-                  </div>
-                  <div className="tof-field">
-                    <span className="tof-field-label">Rationale</span>
-                    <p className="tof-field-value">{concept.rationale}</p>
-                  </div>
-                  <div className="tof-field tof-field-prompt">
-                    <span className="tof-field-label">
-                      <ImageIcon size={13} strokeWidth={2} />
-                      ChatGPT image prompt
-                    </span>
-                    <p className="tof-field-value tof-prompt-value">
-                      {concept.image_prompt}
-                    </p>
-                  </div>
-                </div>
 
-                <div className="tof-concept-actions">
-                  <CopyButton
-                    text={concept.headline}
-                    label="Copy Headline"
-                    variant="headline"
-                  />
-                  {concept.support_line.trim() ? (
-                    <CopyButton
-                      text={concept.support_line}
-                      label="Copy Support Line"
-                      variant="description"
-                    />
-                  ) : null}
-                  <CopyButton
-                    text={concept.image_prompt}
-                    label="Copy Image Prompt"
-                  />
-                  <CopyButton
-                    text={formatFullConcept(concept)}
-                    label="Copy Full Concept"
-                  />
-                </div>
-              </article>
-            ))}
+                  <div className="copy-pack-ad-grid">
+                    <div className="copy-pack-col">
+                      <ReadField label="Headline" value={ad.headline} />
+                      <ReadField label="Primary" value={ad.primary} />
+                      <ReadField label="Description" value={ad.description} />
+                    </div>
+                    <div className="copy-pack-col copy-pack-col-visual">
+                      <ReadField
+                        label="Visual Strategy"
+                        value={ad.visual_strategy}
+                      />
+                      <ReadField label="Image Prompt" value={ad.image_prompt} />
+                      <TofImageUpload
+                        concept={concept}
+                        conceptLabel={naming.adName}
+                        projectId={conceptSet.project_id}
+                        massDesireId={conceptSet.mass_desire_id}
+                        safeFilename={naming.safeFilename}
+                        disabled={busy}
+                        onUpdate={handleConceptImageUpdate}
+                      />
+                    </div>
+                  </div>
+                </article>
+              );
+            })}
           </div>
         </div>
 

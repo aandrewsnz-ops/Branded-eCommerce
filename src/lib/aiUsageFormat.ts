@@ -56,6 +56,8 @@ const WORKFLOW_MODE_TO_USAGE_SECTION: Record<
   avatar: "customer_avatar",
   strategy: "strategy",
   ads: "ads",
+  view_ads: "ads",
+  publish_ads: "ads",
   additional: "additional_content",
 };
 

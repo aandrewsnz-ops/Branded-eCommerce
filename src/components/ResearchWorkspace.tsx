@@ -15,6 +15,7 @@ interface ResearchWorkspaceProps {
   isResearching: boolean;
   isLoading: boolean;
   error: string | null;
+  newSourceIds?: ReadonlySet<string>;
   onRunResearch: () => void;
 }
 
@@ -23,11 +24,17 @@ export function ResearchWorkspace({
   isResearching,
   isLoading,
   error,
+  newSourceIds,
   onRunResearch,
 }: ResearchWorkspaceProps) {
   const [filter, setFilter] = useState<ResearchFilterId>("all");
-  // Selection is UI-only local state (the data model has no selection columns).
   const [selection, setSelection] = useState<ResearchSelectionMap>({});
+
+  const hasSources = sources.length > 0;
+  const buttonLabel = hasSources ? "Fetch another 5" : "Run Research";
+  const loadingLabel = hasSources
+    ? "Fetching another 5…"
+    : "Running research…";
 
   function toggleTag(sourceId: string, tag: ResearchTagId) {
     setSelection((prev) => {
@@ -60,7 +67,18 @@ export function ResearchWorkspace({
         <div>
           <h2 className="workspace-title">Research sources</h2>
           <p className="workspace-sub">
-            {sources.length} saved {sources.length === 1 ? "source" : "sources"}
+            {hasSources ? (
+              <>
+                {sources.length} saved{" "}
+                {sources.length === 1 ? "source" : "sources"}. Fetch another 5
+                to expand the research base.
+              </>
+            ) : (
+              <>
+                No research sources yet. Run Research to gather the first 5
+                sources.
+              </>
+            )}
             {ignoredIds.size > 0 ? ` · ${ignoredIds.size} ignored` : ""}
           </p>
         </div>
@@ -75,7 +93,7 @@ export function ResearchWorkspace({
           ) : (
             <Search size={14} strokeWidth={2.5} />
           )}
-          {isResearching ? "Running research…" : "Run Research"}
+          {isResearching ? loadingLabel : buttonLabel}
         </button>
       </div>
 
@@ -104,7 +122,11 @@ export function ResearchWorkspace({
       {isResearching ? (
         <div className="list-state">
           <Loader2 size={16} strokeWidth={2} className="spin" />
-          <span>Searching public discussions… this can take a minute.</span>
+          <span>
+            {hasSources
+              ? "Searching for additional discussions… this can take a few minutes."
+              : "Searching public discussions… this can take a few minutes."}
+          </span>
         </div>
       ) : null}
 
@@ -118,7 +140,9 @@ export function ResearchWorkspace({
       {!isResearching && !isLoading && sources.length === 0 ? (
         <div className="empty-state">
           <Search size={32} strokeWidth={1.5} />
-          <p>No research sources yet. Run Research to gather them.</p>
+          <p>
+            No research sources yet. Run Research to gather the first 5 sources.
+          </p>
         </div>
       ) : null}
 
@@ -130,6 +154,7 @@ export function ResearchWorkspace({
               source={source}
               tags={selection[source.id] ?? []}
               onToggleTag={(tag) => toggleTag(source.id, tag)}
+              isNew={newSourceIds?.has(source.id)}
             />
           ))}
         </div>

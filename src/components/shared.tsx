@@ -56,7 +56,7 @@ export function CopyButton({
   return (
     <button
       type="button"
-      className={COPY_BUTTON_VARIANT_CLASS[variant]}
+      className={`${COPY_BUTTON_VARIANT_CLASS[variant]}${copied ? " is-copied" : ""}`}
       onClick={() => void handleCopy()}
       disabled={!text.trim()}
     >

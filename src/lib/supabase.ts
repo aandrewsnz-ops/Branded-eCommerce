@@ -14,6 +14,8 @@ import type {
   ResearchInsight,
   ResearchSource,
 } from "../types";
+import type { ProductProjectUpdate } from "./projectSetupFields";
+import { sanitizeYourStoreLogoFields } from "./projectSetupFields";
 
 /**
  * Supabase client for project persistence.
@@ -63,6 +65,70 @@ export async function fetchProjects(): Promise<ProductProject[]> {
   return ((data ?? []) as ProductProject[]).map(normalizeProject);
 }
 
+function buildProjectPayload(
+  input: ProductProjectInput | ProductProjectUpdate
+): Record<string, unknown> {
+  return {
+    our_product_name: input.our_product_name,
+    supplier_product_url: input.supplier_product_url,
+    supplier_product_description: input.supplier_product_description,
+    primary_competitor_url: input.primary_competitor_url,
+    additional_competitor_urls: input.additional_competitor_urls,
+    closest_competitor_product_description:
+      input.closest_competitor_product_description,
+    target_country: input.target_country,
+    cost_price_including_shipping: input.cost_price_including_shipping,
+    planned_sale_price: input.planned_sale_price,
+    current_offer: input.current_offer,
+    initial_problem_hypothesis: input.initial_problem_hypothesis,
+    initial_customer_hypothesis: input.initial_customer_hypothesis,
+    preferred_tone: input.preferred_tone,
+    your_store_name: input.your_store_name,
+    your_store_url: input.your_store_url,
+    product_name: input.our_product_name,
+    product_description: input.supplier_product_description,
+    competitor_url: input.primary_competitor_url,
+    product_price: input.planned_sale_price,
+    offer: input.current_offer,
+    target_customer: input.initial_customer_hypothesis,
+    main_problem: input.initial_problem_hypothesis,
+    brand_tone: input.preferred_tone,
+  };
+}
+
+/**
+ * Update an existing project's setup fields (and optional logo metadata).
+ */
+export async function updateProject(
+  projectId: string,
+  input: ProductProjectUpdate
+): Promise<ProductProject> {
+  if (!supabase) {
+    throw new Error("Supabase is not configured.");
+  }
+
+  const payload: Record<string, unknown> = {
+    ...buildProjectPayload(input),
+  };
+
+  if ("your_store_logo_url" in input) {
+    Object.assign(payload, sanitizeYourStoreLogoFields(input));
+  }
+
+  const { data, error } = await supabase
+    .from(PROJECTS_TABLE)
+    .update(payload)
+    .eq("id", projectId)
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return normalizeProject(data as ProductProject);
+}
+
 /**
  * Insert a new project and return the saved row (with DB-generated id and
  * created_at). Throws on a Supabase error.
@@ -74,18 +140,8 @@ export async function insertProject(
     throw new Error("Supabase is not configured.");
   }
 
-  // Write new fields, and mirror into legacy columns for backwards
-  // compatibility (existing readers + any NOT NULL legacy columns).
   const payload = {
-    ...input,
-    product_name: input.our_product_name,
-    product_description: input.supplier_product_description,
-    competitor_url: input.primary_competitor_url,
-    product_price: input.planned_sale_price,
-    offer: input.current_offer,
-    target_customer: input.initial_customer_hypothesis,
-    main_problem: input.initial_problem_hypothesis,
-    brand_tone: input.preferred_tone,
+    ...buildProjectPayload(input),
     claims_allowed: "",
     claims_banned: "",
     output_goal: "",
@@ -105,48 +161,34 @@ export async function insertProject(
 }
 
 /**
- * Fetch the saved research sources for a project's latest completed research
- * run (stage = "research"). Returns an empty array if there is no completed run
- * or no sources, and in local-only mode (no Supabase client).
+ * Fetch all saved research sources for a project (across all research runs).
+ * Returns an empty array if there are no sources, and in local-only mode.
  */
-export async function fetchLatestResearchSources(
+export async function fetchProjectResearchSources(
   projectId: string
 ): Promise<ResearchSource[]> {
   if (!supabase) {
     return [];
   }
 
-  const { data: runData, error: runError } = await supabase
-    .from("research_runs")
-    .select("id")
-    .eq("project_id", projectId)
-    .eq("stage", "research")
-    .eq("status", "completed")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (runError) {
-    throw new Error(runError.message);
-  }
-
-  if (!runData) {
-    return [];
-  }
-
-  const runId = (runData as { id: string }).id;
-
   const { data, error } = await supabase
     .from("research_sources")
     .select("*")
-    .eq("run_id", runId)
-    .order("relevance_score", { ascending: false });
+    .eq("project_id", projectId)
+    .order("created_at", { ascending: true });
 
   if (error) {
     throw new Error(error.message);
   }
 
   return (data ?? []) as ResearchSource[];
+}
+
+/** @deprecated Use fetchProjectResearchSources */
+export async function fetchLatestResearchSources(
+  projectId: string
+): Promise<ResearchSource[]> {
+  return fetchProjectResearchSources(projectId);
 }
 
 /**
@@ -323,7 +365,89 @@ function normalizeDesireConcept(row: DesireConcept): DesireConcept {
     overlay_recommendation: validOverlays.has(overlay)
       ? overlay
       : "none",
+    image_url: row.image_url ?? undefined,
+    image_path: row.image_path ?? undefined,
+    image_filename: row.image_filename ?? undefined,
+    image_uploaded_at: row.image_uploaded_at ?? undefined,
+    image_file_type: row.image_file_type ?? undefined,
   };
+}
+
+/** Persist uploaded image metadata for one TOF concept row. */
+export async function updateDesireConceptImage(
+  conceptId: string,
+  image: {
+    image_url: string;
+    image_path: string;
+    image_filename: string;
+    image_uploaded_at: string;
+    image_file_type: string;
+  } | null
+): Promise<DesireConcept> {
+  if (!supabase) {
+    throw new Error("Supabase is not configured.");
+  }
+
+  const now = new Date().toISOString();
+  const payload = image
+    ? {
+        ...image,
+        updated_at: now,
+      }
+    : {
+        image_url: null,
+        image_path: null,
+        image_filename: null,
+        image_uploaded_at: null,
+        image_file_type: null,
+        updated_at: now,
+      };
+
+  const { data, error } = await supabase
+    .from("desire_concepts")
+    .update(payload)
+    .eq("id", conceptId)
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return normalizeDesireConcept(data as DesireConcept);
+}
+
+/** Persist primary/headline/description for one TOF concept row. */
+export async function updateDesireConceptCopy(
+  conceptId: string,
+  copy: {
+    primary: string;
+    headline: string;
+    description: string;
+  }
+): Promise<DesireConcept> {
+  if (!supabase) {
+    throw new Error("Supabase is not configured.");
+  }
+
+  const now = new Date().toISOString();
+  const { data, error } = await supabase
+    .from("desire_concepts")
+    .update({
+      rationale: copy.primary,
+      headline: copy.headline,
+      support_line: copy.description,
+      updated_at: now,
+    })
+    .eq("id", conceptId)
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return normalizeDesireConcept(data as DesireConcept);
 }
 
 /** Fetch all saved TOF concept sets for a project, with nested concepts. */

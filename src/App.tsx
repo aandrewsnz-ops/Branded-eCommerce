@@ -8,11 +8,15 @@ import {
   fetchDesireConceptSets,
   fetchMassDesires,
   fetchMarketingAngles,
-  fetchLatestResearchSources,
+  fetchProjectResearchSources,
   fetchProjects,
   insertProject,
+  updateDesireConceptImage,
+  updateDesireConceptCopy,
+  updateProject,
   isSupabaseConfigured,
 } from "./lib/supabase";
+import type { AdCopyDraft } from "./lib/saveFinalAdCopy";
 import type {
   AdCandidate,
   AdCandidatePatch,
@@ -28,6 +32,7 @@ import type {
   RegenerateCopyResponse,
   RegenerateMode,
   AdVariation,
+  DesireConcept,
   DesireConceptSet,
   GenerateCreativePromptsResponse,
   GenerateDesiresResponse,
@@ -47,6 +52,7 @@ import type {
   ProjectAiUsageSummary,
   AiUsageSummary,
 } from "./types";
+import { normalizeProject } from "./types";
 import { AppShell } from "./components/AppShell";
 import { CopyPackModal } from "./components/CopyPackModal";
 import { TofConceptModal } from "./components/TofConceptModal";
@@ -54,17 +60,22 @@ import {
   AiProgressOverlay,
   type AiOverlayStatus,
 } from "./components/AiProgressOverlay";
-import { flattenFinalAds } from "./lib/finalAds";
+import { flattenFinalAds, flattenPublishAds } from "./lib/finalAds";
 import type { AiOperation } from "./lib/aiProgress";
 import { parseAiUsage } from "./lib/aiUsageFormat";
 import {
-  copyErrorBannerMessage,
   copyErrorOverlayDetails,
   parseCopyGenerateError,
-  type CopyFailureStage,
 } from "./lib/copyGenerateErrors";
-import { API_BASE, apiPostJson } from "./lib/api";
+import {
+  parseTofGenerateError,
+  tofErrorOverlayDetails,
+} from "./lib/tofGenerateErrors";
+import type { AiFailureStage } from "./lib/aiFailureStage";
+import { API_BASE } from "./lib/api";
 import type { ModeStatus, WorkflowMode } from "./components/workflow";
+import type { ProductProjectUpdate } from "./lib/projectSetupFields";
+import { sanitizeSetupUpdate } from "./lib/projectSetupFields";
 
 const EMPTY_FORM: ProductProjectInput = {
   our_product_name: "",
@@ -80,6 +91,8 @@ const EMPTY_FORM: ProductProjectInput = {
   initial_problem_hypothesis: "",
   initial_customer_hypothesis: "",
   preferred_tone: "",
+  your_store_name: "",
+  your_store_url: "",
 };
 
 const SAMPLE_PROJECTS: ProductProject[] = [
@@ -137,7 +150,7 @@ type AiOverlaySession = {
   startedAt: number;
   sessionKey: string;
   usage: AiUsageSummary | null;
-  errorStage?: CopyFailureStage | null;
+  errorStage?: AiFailureStage | null;
   errorDetails?: string | null;
 };
 
@@ -156,6 +169,8 @@ function App() {
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(
     null
   );
+  const [isSavingSetup, setIsSavingSetup] = useState(false);
+  const [setupError, setSetupError] = useState<string | null>(null);
 
   // Workflow-mode command-centre UI state.
   const [mode, setMode] = useState<WorkflowMode>("setup");
@@ -167,6 +182,9 @@ function App() {
   const [researchingId, setResearchingId] = useState<string | null>(null);
   const [researchError, setResearchError] = useState<string | null>(null);
   const [sourcesLoadingId, setSourcesLoadingId] = useState<string | null>(null);
+  const [newResearchSourceIds, setNewResearchSourceIds] = useState<
+    Record<string, string[]>
+  >({});
 
   // Insight reports + status, keyed by project id. `undefined` = not yet loaded.
   const [insightByProject, setInsightByProject] = useState<
@@ -410,7 +428,7 @@ function App() {
       setSourcesLoadingId(selectedId);
       setResearchError(null);
       try {
-        const sources = await fetchLatestResearchSources(selectedId);
+        const sources = await fetchProjectResearchSources(selectedId);
         if (cancelled) return;
         setResearchByProject((prev) => ({ ...prev, [selectedId]: sources }));
       } catch (err: unknown) {
@@ -622,11 +640,12 @@ function App() {
     setError(null);
 
     if (!isSupabaseConfigured) {
-      const localProject: ProductProject = {
-        ...form,
+      const sanitized = sanitizeSetupUpdate(form);
+      const localProject: ProductProject = normalizeProject({
+        ...sanitized,
         id: createId(),
         created_at: new Date().toISOString(),
-      };
+      } as ProductProject);
       setProjects((prev) => [localProject, ...prev]);
       setSelectedId(localProject.id);
       setForm(EMPTY_FORM);
@@ -635,7 +654,7 @@ function App() {
 
     setIsCreating(true);
     try {
-      const saved = await insertProject(form);
+      const saved = await insertProject(sanitizeSetupUpdate(form));
       setProjects((prev) => [saved, ...prev]);
       setSelectedId(saved.id);
       setForm(EMPTY_FORM);
@@ -670,6 +689,47 @@ function App() {
     setCopySetsByProject(drop);
     setCreativePromptSetsByProject(drop);
     setAdCandidatesByProject(drop);
+  }
+
+  async function handleSaveSetup(
+    projectId: string,
+    patch: ProductProjectUpdate
+  ) {
+    setStatusMessage(null);
+    setSetupError(null);
+    setIsSavingSetup(true);
+
+    const sanitized = sanitizeSetupUpdate(patch);
+
+    try {
+      if (!isSupabaseConfigured) {
+        setProjects((prev) =>
+          prev.map((project) =>
+            project.id === projectId
+              ? normalizeProject({
+                  ...project,
+                  ...sanitized,
+                } as ProductProject)
+              : project
+          )
+        );
+        setStatusMessage("Setup saved.");
+        return;
+      }
+
+      const saved = await updateProject(projectId, sanitized);
+
+      setProjects((prev) =>
+        prev.map((project) => (project.id === projectId ? saved : project))
+      );
+      setStatusMessage("Setup saved.");
+    } catch (err: unknown) {
+      setSetupError(
+        err instanceof Error ? err.message : "Failed to save setup."
+      );
+    } finally {
+      setIsSavingSetup(false);
+    }
   }
 
   async function handleDeleteProject(projectId: string) {
@@ -755,7 +815,7 @@ function App() {
 
   function failAiOverlay(options: {
     usage?: AiUsageSummary | null;
-    errorStage?: CopyFailureStage | null;
+    errorStage?: AiFailureStage | null;
     errorDetails?: string | null;
   }) {
     setAiOverlaySession((prev) =>
@@ -779,23 +839,41 @@ function App() {
     setStatusMessage(null);
     setResearchError(null);
     setResearchingId(projectId);
-    beginAiOverlay("research", `research-${projectId}`);
+
+    const existingSources = researchByProject[projectId] ?? [];
+    const mode = existingSources.length > 0 ? "append" : "initial";
+    const overlayOperation = mode === "append" ? "research_append" : "research";
+
+    beginAiOverlay(overlayOperation, `research-${projectId}-${mode}`);
 
     try {
       const res = await fetch(`${API_BASE}/api/research/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId }),
+        body: JSON.stringify({ projectId, mode, batchSize: 5 }),
       });
 
       const payload: unknown = await res.json().catch(() => null);
 
       if (!res.ok) {
         const message =
-          payload && typeof payload === "object" && "error" in payload
-            ? String((payload as { error: unknown }).error)
-            : `Research failed (HTTP ${res.status}).`;
-        throw new Error(message);
+          payload && typeof payload === "object" && "details" in payload
+            ? String((payload as { details: unknown }).details)
+            : payload && typeof payload === "object" && "error" in payload
+              ? String((payload as { error: unknown }).error)
+              : res.status === 520
+                ? "The upstream request returned 520 with no body. The dev proxy may have timed out while the backend was still working."
+                : `Research failed (HTTP ${res.status}).`;
+
+        failAiOverlay({
+          usage:
+            payload && typeof payload === "object" && "ai_usage" in payload
+              ? (payload as { ai_usage: AiUsageSummary }).ai_usage
+              : parseAiUsage(payload),
+          errorStage: "openai",
+          errorDetails: message,
+        });
+        return;
       }
 
       const data = payload as RunResearchResponse;
@@ -803,13 +881,36 @@ function App() {
         ...prev,
         [projectId]: data.sources,
       }));
+      setNewResearchSourceIds((prev) => ({
+        ...prev,
+        [projectId]: (data.new_sources ?? []).map((source) => source.id),
+      }));
+
+      const total = data.total_sources ?? data.sources.length;
+      const added = data.new_sources?.length ?? data.sources.length;
+      const warning =
+        payload &&
+        typeof payload === "object" &&
+        "warning" in payload &&
+        typeof (payload as { warning: unknown }).warning === "string"
+          ? (payload as { warning: string }).warning
+          : null;
+
       setStatusMessage(
-        `Research complete: ${data.sources.length} sources saved.`
+        warning
+          ? `Research complete: ${added} new source${added === 1 ? "" : "s"} saved (${total} total). ${warning}`
+          : mode === "append"
+            ? `Research complete: ${added} new source${added === 1 ? "" : "s"} saved (${total} total).`
+            : `Research complete: ${total} source${total === 1 ? "" : "s"} saved.`
       );
       succeedAiOverlay(data.ai_usage ?? parseAiUsage(payload), projectId);
     } catch (err: unknown) {
-      dismissAiOverlay();
-      setResearchError(err instanceof Error ? err.message : "Research failed.");
+      const message =
+        err instanceof Error ? err.message : "Research failed.";
+      failAiOverlay({
+        errorStage: "unknown",
+        errorDetails: message,
+      });
     } finally {
       setResearchingId((current) => (current === projectId ? null : current));
     }
@@ -1007,6 +1108,100 @@ function App() {
     });
   }
 
+  async function handleUpdateTofConcept(
+    concept: DesireConcept
+  ): Promise<DesireConcept> {
+    const hasImage = Boolean(
+      concept.image_url?.trim() &&
+        concept.image_path?.trim() &&
+        concept.image_filename?.trim() &&
+        concept.image_uploaded_at?.trim() &&
+        concept.image_file_type?.trim()
+    );
+
+    const saved = await updateDesireConceptImage(
+      concept.id,
+      hasImage
+        ? {
+            image_url: concept.image_url!,
+            image_path: concept.image_path!,
+            image_filename: concept.image_filename!,
+            image_uploaded_at: concept.image_uploaded_at!,
+            image_file_type: concept.image_file_type!,
+          }
+        : null
+    );
+
+    setConceptSetsByProject((prev) => {
+      const existing = prev[saved.project_id] ?? [];
+      const next = existing.map((set) =>
+        set.id === saved.concept_set_id
+          ? {
+              ...set,
+              concepts: set.concepts.map((row) =>
+                row.id === saved.id ? saved : row
+              ),
+            }
+          : set
+      );
+      return { ...prev, [saved.project_id]: next };
+    });
+
+    setTofModal((current) => {
+      if (!current || current.conceptSet.id !== saved.concept_set_id) {
+        return current;
+      }
+      return {
+        ...current,
+        conceptSet: {
+          ...current.conceptSet,
+          concepts: current.conceptSet.concepts.map((row) =>
+            row.id === saved.id ? saved : row
+          ),
+        },
+      };
+    });
+
+    return saved;
+  }
+
+  async function handleUpdateTofConceptCopy(
+    conceptId: string,
+    copy: AdCopyDraft
+  ): Promise<void> {
+    const saved = await updateDesireConceptCopy(conceptId, copy);
+
+    setConceptSetsByProject((prev) => {
+      const existing = prev[saved.project_id] ?? [];
+      const next = existing.map((set) =>
+        set.id === saved.concept_set_id
+          ? {
+              ...set,
+              concepts: set.concepts.map((row) =>
+                row.id === saved.id ? saved : row
+              ),
+            }
+          : set
+      );
+      return { ...prev, [saved.project_id]: next };
+    });
+
+    setTofModal((current) => {
+      if (!current || current.conceptSet.id !== saved.concept_set_id) {
+        return current;
+      }
+      return {
+        ...current,
+        conceptSet: {
+          ...current.conceptSet,
+          concepts: current.conceptSet.concepts.map((row) =>
+            row.id === saved.id ? saved : row
+          ),
+        },
+      };
+    });
+  }
+
   async function handleGenerateTofConcepts(
     projectId: string,
     massDesireId: string
@@ -1016,15 +1211,43 @@ function App() {
     setGeneratingTofDesireId(massDesireId);
     beginAiOverlay("tof_concepts", `tof_concepts-${massDesireId}`);
 
-    const url = `${API_BASE}/api/tof-concepts/generate`;
-
     try {
-      const data = await apiPostJson<GenerateTofConceptsResponse>(
-        "/api/tof-concepts/generate",
-        { projectId, massDesireId },
-        "TOF concept generation failed."
-      );
+      const res = await fetch(`${API_BASE}/api/tof-concepts/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId, massDesireId }),
+      });
 
+      const payload: unknown = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        const structured = parseTofGenerateError(payload, res.status);
+        if (structured) {
+          failAiOverlay({
+            usage: structured.ai_usage ?? parseAiUsage(payload),
+            errorStage: structured.stage,
+            errorDetails: tofErrorOverlayDetails(structured),
+          });
+          return;
+        }
+
+        const message =
+          payload && typeof payload === "object" && "details" in payload
+            ? String((payload as { details: unknown }).details)
+            : payload && typeof payload === "object" && "error" in payload
+              ? String((payload as { error: unknown }).error)
+              : res.status === 520
+                ? "The upstream request returned 520 with no body. The dev proxy may have timed out while the backend was still working."
+                : `TOF copy pack generation failed (HTTP ${res.status}).`;
+
+        failAiOverlay({
+          errorStage: "unknown",
+          errorDetails: message,
+        });
+        return;
+      }
+
+      const data = payload as GenerateTofConceptsResponse;
       setConceptSetsByProject((prev) => {
         const existing = prev[projectId] ?? [];
         const filtered = existing.filter(
@@ -1037,18 +1260,16 @@ function App() {
       });
       openTofConcepts(data.conceptSet);
       setStatusMessage("Top of funnel concepts generated.");
-      succeedAiOverlay(data.ai_usage ?? null, projectId);
+      succeedAiOverlay(data.ai_usage ?? parseAiUsage(payload), projectId);
     } catch (err: unknown) {
-      dismissAiOverlay();
-      console.error("[tof] Generate TOF Concepts failed:", {
-        url,
-        error: err,
-      });
-      setTofError(
+      const message =
         err instanceof Error
           ? err.message
-          : "TOF concept generation failed."
-      );
+          : "TOF copy pack generation failed.";
+      failAiOverlay({
+        errorStage: "unknown",
+        errorDetails: message,
+      });
     } finally {
       setGeneratingTofDesireId((current) =>
         current === massDesireId ? null : current
@@ -1082,7 +1303,6 @@ function App() {
             errorStage: structured.stage,
             errorDetails: copyErrorOverlayDetails(structured),
           });
-          setCopyError(copyErrorBannerMessage(structured));
           return;
         }
 
@@ -1099,7 +1319,6 @@ function App() {
           errorStage: "unknown",
           errorDetails: message,
         });
-        setCopyError(message);
         return;
       }
 
@@ -1137,7 +1356,6 @@ function App() {
         errorStage: "unknown",
         errorDetails: message,
       });
-      setCopyError(message);
     } finally {
       setGeneratingCopyAngleId((current) =>
         current === marketingAngleId ? null : current
@@ -1477,13 +1695,19 @@ function App() {
     : [];
 
   const finalAdCount = flattenFinalAds(desires, angles, copySets).length;
+  const publishAdCount = flattenPublishAds(desires, angles, copySets).length;
 
   const statuses: Record<WorkflowMode, ModeStatus> = {
     setup: selectedProject ? "done" : "missing",
-    research: sources.length > 0 ? "done" : "missing",
+    research:
+      sources.length >= 5
+        ? "done"
+        : sources.length > 0
+          ? "ready"
+          : "missing",
     insight_report: insight
       ? "done"
-      : sources.length > 0
+      : sources.length >= 5
         ? "ready"
         : "missing",
     avatar: avatar ? "done" : insight ? "ready" : "missing",
@@ -1494,6 +1718,18 @@ function App() {
           ? "ready"
           : "missing",
     ads: finalAdCount > 0 ? "done" : copySets.length > 0 ? "ready" : "missing",
+    view_ads:
+      finalAdCount > 0
+        ? "done"
+        : copySets.length > 0
+          ? "ready"
+          : "missing",
+    publish_ads:
+      publishAdCount > 0
+        ? "done"
+        : finalAdCount > 0
+          ? "ready"
+          : "missing",
     additional:
       copySets.length > 0 || creativePromptSets.length > 0 ? "ready" : "missing",
   };
@@ -1512,6 +1748,13 @@ function App() {
       onCreateProject={handleCreateProject}
       isCreating={isCreating}
       createError={error}
+      isSavingSetup={isSavingSetup}
+      setupError={setupError}
+      onSaveSetup={(patch) =>
+        selectedProject
+          ? handleSaveSetup(selectedProject.id, patch)
+          : Promise.resolve()
+      }
       mode={mode}
       onChangeMode={setMode}
       statuses={statuses}
@@ -1528,6 +1771,11 @@ function App() {
       isResearching={researchingId === selectedId}
       isSourcesLoading={sourcesLoadingId === selectedId}
       researchError={researchError}
+      newResearchSourceIds={
+        selectedId
+          ? new Set(newResearchSourceIds[selectedId] ?? [])
+          : new Set()
+      }
       isGeneratingInsight={generatingInsightId === selectedId}
       isInsightLoading={insightLoadingId === selectedId}
       insightError={insightError}
@@ -1597,7 +1845,9 @@ function App() {
       onOpenCopyPack={(copySet, angleName) =>
         openCopyPack(copySet, angleName)
       }
+      onSaveCopyPack={handleSaveCopyPack}
       onFixImageFilename={handleFixImageFilename}
+      onUpdateTofConceptCopy={handleUpdateTofConceptCopy}
       projectAiUsage={displayedProjectAiUsage}
       projectCostById={projectCostById}
     />
@@ -1637,9 +1887,11 @@ function App() {
         <TofConceptModal
           key={tofModal.conceptSet.id}
           conceptSet={tofModal.conceptSet}
+          desires={desiresByProject[tofModal.conceptSet.project_id] ?? []}
           desireTitle={tofModal.desireTitle}
           offer={tofModal.offer}
           product={tofModal.product}
+          onUpdateConcept={handleUpdateTofConcept}
           onClose={() => setTofModal(null)}
         />
       ) : null}

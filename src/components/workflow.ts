@@ -15,6 +15,8 @@ export type WorkflowMode =
   | "avatar"
   | "strategy"
   | "ads"
+  | "view_ads"
+  | "publish_ads"
   | "additional";
 
 export interface WorkflowModeDef {
@@ -28,7 +30,9 @@ export const WORKFLOW_MODES: readonly WorkflowModeDef[] = [
   { id: "insight_report", label: "Insight Report" },
   { id: "avatar", label: "Customer Avatar" },
   { id: "strategy", label: "Strategy" },
-  { id: "ads", label: "Ads" },
+  { id: "ads", label: "Review Ads" },
+  { id: "view_ads", label: "View Ads" },
+  { id: "publish_ads", label: "Publish Ads" },
   { id: "additional", label: "Additional Content" },
 ] as const;
 
@@ -296,6 +300,36 @@ export function conceptSetForDesire(
   conceptSets: DesireConceptSet[]
 ): DesireConceptSet | undefined {
   return conceptSets.find((set) => set.mass_desire_id === desireId);
+}
+
+/** Count TOF ads with an uploaded image URL. */
+export function conceptSetUploadedImageCount(
+  conceptSet: DesireConceptSet | undefined
+): number {
+  if (!conceptSet?.concepts?.length) return 0;
+  return conceptSet.concepts.filter((concept) =>
+    Boolean(concept.image_url?.trim())
+  ).length;
+}
+
+/** Badge label for Strategy mass desire cards when TOF images exist. */
+export function conceptSetImageBadgeLabel(
+  conceptSet: DesireConceptSet | undefined
+): string | null {
+  const count = conceptSetUploadedImageCount(conceptSet);
+  if (count === 0) return null;
+  const total = conceptSet?.concepts?.length ?? 0;
+  if (total > 0 && count >= total) {
+    return `${total} Images Added`;
+  }
+  return "Images Added";
+}
+
+/** True when a saved TOF copy pack exists for the mass desire. */
+export function conceptSetHasCopy(
+  conceptSet: DesireConceptSet | undefined
+): boolean {
+  return Boolean(conceptSet?.concepts?.length);
 }
 
 /** True when at least one ad in the copy pack is marked as a winner. */

@@ -4,7 +4,6 @@ import type {
   CustomerAvatarContent,
   MassDesire,
   TofConceptDraft,
-  TofOverlayRecommendation,
   PainCluster,
 } from "../src/types";
 import {
@@ -18,14 +17,8 @@ import {
 } from "./openai";
 import type { AiUsageLogContext, AiUsageSummary } from "./ai-usage";
 
-/** How many top-of-funnel concepts to generate per mass desire. */
+/** How many top-of-funnel ads to generate per mass desire. */
 export const TOF_CONCEPT_COUNT = 3;
-
-const OVERLAY_VALUES = new Set<TofOverlayRecommendation>([
-  "none",
-  "headline_only",
-  "headline_plus_support_line",
-]);
 
 const INTENSITY_RANK: Record<string, number> = {
   high: 3,
@@ -49,29 +42,13 @@ function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
-function normalizeOverlay(value: unknown): TofOverlayRecommendation {
-  const raw = toStringValue(value).toLowerCase().replace(/\s+/g, "_");
-  if (OVERLAY_VALUES.has(raw as TofOverlayRecommendation)) {
-    return raw as TofOverlayRecommendation;
-  }
-  if (raw.includes("headline") && raw.includes("support")) {
-    return "headline_plus_support_line";
-  }
-  if (raw.includes("headline")) {
-    return "headline_only";
-  }
-  return "none";
-}
-
 function normalizeConcept(value: unknown): TofConceptDraft {
   const r = asRecord(value);
   return {
-    concept_title: toStringValue(r.concept_title),
+    primary: toStringValue(r.primary),
     headline: toStringValue(r.headline),
-    support_line: toStringValue(r.support_line),
-    overlay_recommendation: normalizeOverlay(r.overlay_recommendation),
+    description: toStringValue(r.description),
     visual_strategy: toStringValue(r.visual_strategy),
-    rationale: toStringValue(r.rationale),
     image_prompt: toStringValue(r.image_prompt),
   };
 }
@@ -83,44 +60,21 @@ function validateConceptPack(concepts: TofConceptDraft[]): TofConceptDraft[] {
     );
   }
 
+  const required: (keyof TofConceptDraft)[] = [
+    "primary",
+    "headline",
+    "description",
+    "visual_strategy",
+    "image_prompt",
+  ];
+
   concepts.forEach((concept, index) => {
-    const required: (keyof TofConceptDraft)[] = [
-      "concept_title",
-      "headline",
-      "support_line",
-      "overlay_recommendation",
-      "visual_strategy",
-      "rationale",
-      "image_prompt",
-    ];
     for (const field of required) {
-      if (field === "support_line") {
-        if (typeof concept.support_line !== "string") {
-          throw new Error(`Concept ${index + 1} is missing support_line.`);
-        }
-        continue;
-      }
-      if (field === "overlay_recommendation") {
-        if (!concept.overlay_recommendation) {
-          throw new Error(
-            `Concept ${index + 1} is missing overlay_recommendation.`
-          );
-        }
-        continue;
-      }
       if (!concept[field]?.trim()) {
         throw new Error(
           `Concept ${index + 1} is missing required field "${field}".`
         );
       }
-    }
-    if (
-      concept.overlay_recommendation === "headline_plus_support_line" &&
-      !concept.support_line.trim()
-    ) {
-      throw new Error(
-        `Concept ${index + 1} uses headline_plus_support_line but support_line is empty.`
-      );
     }
   });
 
@@ -225,26 +179,44 @@ function buildPrompt(
   const context = buildCompactTofContext(project, massDesire, insight, avatar);
 
   return [
-    "Generate exactly 3 top of funnel Meta ad concepts from the mass desire.",
-    "These are broad, emotional, visual-first concepts — NOT angle-level direct response ads.",
-    "Each concept must be simple, scroll-stopping, and understandable in under 2 seconds.",
-    "Use minimal copy. Product can be subtle or secondary.",
-    "Avoid clutter, before/after imagery, medical claims, and procedure comparisons.",
+    "Generate 3 complete top-of-funnel Meta ad concepts for this mass desire.",
     "",
-    "Each concept needs:",
-    "- concept_title: short internal title",
-    "- headline: short punchy line",
-    "- support_line: very short or empty string",
-    "- overlay_recommendation: none | headline_only | headline_plus_support_line",
-    "- visual_strategy: why the image stops scroll",
-    "- rationale: one short sentence",
-    "- image_prompt: full ChatGPT-ready 1:1 Meta ad image prompt; simple, clean, scroll-stopping",
+    "Each concept must be a complete ad unit with:",
+    "- primary",
+    "- headline",
+    "- description",
+    "- visual_strategy",
+    "- image_prompt",
+    "",
+    "The mass desire is the core click trigger.",
+    "The headline must be the mass desire itself, or a tight customer-language compression of it if the exact mass desire is too long for a clean Meta headline.",
+    "The primary text should expand the emotional truth behind the headline and make the customer feel immediately seen.",
+    "The description should be short and practical, clarifying the product role or reason to click.",
+    "The visual_strategy should explain why the image stops the scroll, what emotion it triggers, and how it reinforces the desire.",
+    "The image_prompt should be a clean, paste-ready ChatGPT image generation prompt.",
+    "All five fields must align around the same desire.",
+    "Do not create generic concept names.",
+    "Do not make the image prompt a separate idea from the copy.",
+    "Do not include safety, compliance, avoidance, or policy language inside the final image_prompt.",
+    "",
+    "Creative positioning:",
+    "- Image-first and scroll-stopping",
+    "- Instant recognition — the user should feel \"that is exactly my problem\"",
+    "- Emotionally direct and simple enough for Meta",
+    "- Broader than angle-level direct response, but still usable as real ads",
+    "- Avoid generic product hero concepts unless the product hero directly expresses the desire",
+    "- Avoid concept-board language",
+    "",
+    "Truthfulness:",
+    "- Do not invent proof, testimonials, stats, clinical evidence, or guaranteed results",
+    "- Keep claims cosmetic and plausible",
+    "- For skincare: do not claim permanent pore removal, medical treatment, or guaranteed transformation",
     "",
     "Context (JSON):",
     JSON.stringify(context),
     "",
     "Return VALID JSON ONLY (no markdown):",
-    '{ "concepts": [ { "concept_title": "...", "headline": "...", "support_line": "...", "overlay_recommendation": "none", "visual_strategy": "...", "rationale": "...", "image_prompt": "..." } ] }',
+    '{ "concepts": [ { "primary": "...", "headline": "...", "description": "...", "visual_strategy": "...", "image_prompt": "..." } ] }',
     "",
     `"concepts" MUST contain exactly ${TOF_CONCEPT_COUNT} items.`,
   ].join("\n");
@@ -253,9 +225,9 @@ function buildPrompt(
 function buildRepairPrompt(rawText: string): string {
   return [
     "Fix the JSON below so it matches this schema exactly.",
-    "Return VALID JSON ONLY with exactly 3 concepts.",
+    "Return VALID JSON ONLY with exactly 3 complete ad concepts.",
     "",
-    '{ "concepts": [ { "concept_title": "string", "headline": "string", "support_line": "string", "overlay_recommendation": "none|headline_only|headline_plus_support_line", "visual_strategy": "string", "rationale": "string", "image_prompt": "string" } ] }',
+    '{ "concepts": [ { "primary": "string", "headline": "string", "description": "string", "visual_strategy": "string", "image_prompt": "string" } ] }',
     "",
     "Broken response:",
     truncate(rawText, 4000),
@@ -300,7 +272,7 @@ async function requestTofConcepts(
   );
 }
 
-/** Generate 3 top-of-funnel concepts for a mass desire. */
+/** Generate 3 top-of-funnel ad concepts for a mass desire. */
 export async function generateTofConcepts(
   project: ProductProject,
   insight: ResearchInsight,

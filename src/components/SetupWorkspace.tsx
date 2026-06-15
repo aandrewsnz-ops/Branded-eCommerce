@@ -1,159 +1,357 @@
-import { ExternalLink, Link2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { AlertTriangle, Loader2, Save } from "lucide-react";
 import type { ProductProject } from "../types";
-import { DetailField } from "./shared";
 import {
-  formatCompetitorLink,
-  parseCompetitorLinks,
-  type CompetitorLink,
-} from "./workflow";
+  projectToSetupDraft,
+  sanitizeSetupUpdate,
+  type ProductProjectUpdate,
+} from "../lib/projectSetupFields";
+import type { StoreLogoMeta } from "../lib/storeLogoStorage";
+import { isSupabaseConfigured } from "../lib/supabase";
+import { YourStoreLogoUpload } from "./YourStoreLogoUpload";
+import { AutoResizeTextarea } from "./AutoResizeTextarea";
+
+/** Minimum textarea heights for auto-resize setup fields (px). */
+const SETUP_TEXTAREA_MIN = {
+  urls: 100,
+  supplierDescription: 180,
+  competitorDescription: 220,
+  hypothesis: 140,
+} as const;
 
 interface SetupWorkspaceProps {
   project: ProductProject;
+  isSaving: boolean;
+  saveError: string | null;
+  onSave: (patch: ProductProjectUpdate) => Promise<void>;
 }
 
-function CompetitorLinkRow({ link }: { link: CompetitorLink }) {
+type TextareaSize = keyof typeof SETUP_TEXTAREA_MIN;
+
+interface SetupFieldProps {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  multiline?: boolean;
+  textareaSize?: TextareaSize;
+  placeholder?: string;
+  disabled?: boolean;
+}
+
+function SetupField({
+  label,
+  value,
+  onChange,
+  multiline = false,
+  textareaSize,
+  placeholder,
+  disabled = false,
+}: SetupFieldProps) {
+  const textareaClass = "setup-input setup-textarea setup-textarea-auto";
+
   return (
-    <a
-      className="competitor-link"
-      href={link.href}
-      target="_blank"
-      rel="noreferrer"
-    >
-      <Link2 size={14} strokeWidth={2} />
-      <span className="competitor-link-label">{link.label}</span>
-      <ExternalLink size={13} strokeWidth={2} className="competitor-link-ext" />
-    </a>
+    <label className="setup-field">
+      <span className="setup-field-label">{label}</span>
+      {multiline ? (
+        <AutoResizeTextarea
+          className={textareaClass}
+          value={value}
+          placeholder={placeholder}
+          disabled={disabled}
+          minHeight={
+            textareaSize ? SETUP_TEXTAREA_MIN[textareaSize] : 120
+          }
+          onChange={onChange}
+        />
+      ) : (
+        <input
+          className="setup-input"
+          value={value}
+          placeholder={placeholder}
+          disabled={disabled}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      )}
+    </label>
   );
 }
 
-export function SetupWorkspace({ project }: SetupWorkspaceProps) {
-  const primaryLink = formatCompetitorLink(project.primary_competitor_url);
-  const additionalLinks = parseCompetitorLinks(
-    project.additional_competitor_urls
+function SetupSection({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="setup-section">
+      <header className="setup-section-head">
+        <h3 className="setup-section-title">{title}</h3>
+        {description ? (
+          <p className="setup-section-desc">{description}</p>
+        ) : null}
+      </header>
+      <div className="setup-section-body">{children}</div>
+    </section>
   );
-  const supplierLink = formatCompetitorLink(project.supplier_product_url);
+}
+
+export function SetupWorkspace({
+  project,
+  isSaving,
+  saveError,
+  onSave,
+}: SetupWorkspaceProps) {
+  const [draft, setDraft] = useState<ProductProjectUpdate>(() =>
+    projectToSetupDraft(project)
+  );
+  const [dirty, setDirty] = useState(false);
+
+  useEffect(() => {
+    setDraft(projectToSetupDraft(project));
+    setDirty(false);
+  }, [project]);
+
+  function updateDraft<K extends keyof ProductProjectUpdate>(
+    key: K,
+    value: ProductProjectUpdate[K]
+  ) {
+    setDraft((prev) => ({ ...prev, [key]: value }));
+    setDirty(true);
+  }
+
+  function handleLogoChange(meta: StoreLogoMeta | null) {
+    if (meta) {
+      setDraft((prev) => ({
+        ...prev,
+        your_store_logo_url: meta.your_store_logo_url,
+        your_store_logo_path: meta.your_store_logo_path,
+        your_store_logo_filename: meta.your_store_logo_filename,
+        your_store_logo_uploaded_at: meta.your_store_logo_uploaded_at,
+      }));
+    } else {
+      setDraft((prev) => ({
+        ...prev,
+        your_store_logo_url: null,
+        your_store_logo_path: null,
+        your_store_logo_filename: null,
+        your_store_logo_uploaded_at: null,
+      }));
+    }
+    setDirty(true);
+  }
+
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await onSave(sanitizeSetupUpdate(draft));
+    setDirty(false);
+  }
+
+  const logoUploadDisabled = isSaving || !isSupabaseConfigured;
 
   return (
-    <div className="workspace workspace-full">
-      <div className="workspace-head">
-        <div>
-          <h2 className="workspace-title">
-            {project.our_product_name || "Untitled project"}
-          </h2>
-          {project.initial_customer_hypothesis ? (
+    <form className="workspace workspace-full setup-form" onSubmit={handleSubmit}>
+      <div className="setup-brief">
+        <div className="workspace-head setup-page-head">
+          <div>
+            <h2 className="workspace-title">Project setup</h2>
             <p className="workspace-sub">
-              {project.initial_customer_hypothesis}
+              Editable project brief. Changes here do not reset downstream
+              workflow data.
             </p>
-          ) : null}
+          </div>
+          <button
+            type="submit"
+            className="btn btn-primary btn-sm"
+            disabled={isSaving || !dirty}
+          >
+            {isSaving ? (
+              <Loader2 size={14} strokeWidth={2.5} className="spin" />
+            ) : (
+              <Save size={14} strokeWidth={2.5} />
+            )}
+            {isSaving ? "Saving…" : "Save changes"}
+          </button>
         </div>
-        <div className="setup-head-pills">
-          {project.target_country ? (
-            <span className="price-pill price-pill-muted">
-              {project.target_country}
+
+        {saveError ? (
+          <div className="banner banner-error" role="alert">
+            <AlertTriangle size={16} />
+            <span>{saveError}</span>
+          </div>
+        ) : null}
+
+        {!isSupabaseConfigured ? (
+          <div className="banner banner-info" role="status">
+            <AlertTriangle size={16} />
+            <span>
+              Supabase is not configured. Setup edits are kept in memory only
+              for this session.
             </span>
-          ) : null}
-          {project.planned_sale_price ? (
-            <span className="price-pill">{project.planned_sale_price}</span>
-          ) : null}
+          </div>
+        ) : null}
+
+        <p className="setup-brief-note">
+          “Our product name” is used later for copy and publishing — not as a
+          research search term.
+        </p>
+
+        <div className="setup-sections">
+          <SetupSection
+            title="Your store branding"
+            description="Used later for ad previews."
+          >
+            <div className="setup-branding-grid">
+              <SetupField
+                label="Your store name"
+                value={draft.your_store_name}
+                placeholder="Westward Vault"
+                disabled={isSaving}
+                onChange={(value) => updateDraft("your_store_name", value)}
+              />
+              <SetupField
+                label="Your store URL"
+                value={draft.your_store_url}
+                placeholder="https://westwardvault.com"
+                disabled={isSaving}
+                onChange={(value) => updateDraft("your_store_url", value)}
+              />
+              <div className="setup-field setup-branding-logo">
+                <span className="setup-field-label">Your store logo</span>
+                <YourStoreLogoUpload
+                  projectId={project.id}
+                  logoUrl={draft.your_store_logo_url}
+                  logoPath={draft.your_store_logo_path}
+                  disabled={logoUploadDisabled}
+                  variant="compact"
+                  onChange={handleLogoChange}
+                />
+              </div>
+            </div>
+          </SetupSection>
+
+          <SetupSection title="Product basics">
+            <div className="setup-short-grid setup-short-grid-3">
+              <SetupField
+                label="Our product name"
+                value={draft.our_product_name}
+                disabled={isSaving}
+                onChange={(value) => updateDraft("our_product_name", value)}
+              />
+              <SetupField
+                label="Target country"
+                value={draft.target_country}
+                disabled={isSaving}
+                onChange={(value) => updateDraft("target_country", value)}
+              />
+              <SetupField
+                label="Cost price (incl. shipping)"
+                value={draft.cost_price_including_shipping}
+                disabled={isSaving}
+                onChange={(value) =>
+                  updateDraft("cost_price_including_shipping", value)
+                }
+              />
+              <SetupField
+                label="Planned sale price"
+                value={draft.planned_sale_price}
+                disabled={isSaving}
+                onChange={(value) => updateDraft("planned_sale_price", value)}
+              />
+              <SetupField
+                label="Current offer"
+                value={draft.current_offer}
+                disabled={isSaving}
+                onChange={(value) => updateDraft("current_offer", value)}
+              />
+              <SetupField
+                label="Supplier product URL"
+                value={draft.supplier_product_url}
+                disabled={isSaving}
+                onChange={(value) => updateDraft("supplier_product_url", value)}
+              />
+            </div>
+          </SetupSection>
+
+          <SetupSection title="Product source details">
+            <SetupField
+              label="Supplier product description"
+              value={draft.supplier_product_description}
+              multiline
+              textareaSize="supplierDescription"
+              disabled={isSaving}
+              onChange={(value) =>
+                updateDraft("supplier_product_description", value)
+              }
+            />
+          </SetupSection>
+
+          <SetupSection title="Competitor facts">
+            <SetupField
+              label="Primary competitor URL"
+              value={draft.primary_competitor_url}
+              disabled={isSaving}
+              onChange={(value) => updateDraft("primary_competitor_url", value)}
+            />
+            <SetupField
+              label="Additional competitor URLs"
+              value={draft.additional_competitor_urls}
+              multiline
+              textareaSize="urls"
+              disabled={isSaving}
+              onChange={(value) =>
+                updateDraft("additional_competitor_urls", value)
+              }
+            />
+            <SetupField
+              label="Closest competitor product description"
+              value={draft.closest_competitor_product_description}
+              multiline
+              textareaSize="competitorDescription"
+              disabled={isSaving}
+              onChange={(value) =>
+                updateDraft("closest_competitor_product_description", value)
+              }
+            />
+          </SetupSection>
+
+          <SetupSection
+            title="Research assumptions"
+            description="Optional seeds only. Preferred tone does not override research-derived tone."
+          >
+            <div className="setup-research-grid">
+              <SetupField
+                label="Initial problem hypothesis"
+                value={draft.initial_problem_hypothesis}
+                multiline
+                textareaSize="hypothesis"
+                disabled={isSaving}
+                onChange={(value) =>
+                  updateDraft("initial_problem_hypothesis", value)
+                }
+              />
+              <SetupField
+                label="Initial customer hypothesis"
+                value={draft.initial_customer_hypothesis}
+                multiline
+                textareaSize="hypothesis"
+                disabled={isSaving}
+                onChange={(value) =>
+                  updateDraft("initial_customer_hypothesis", value)
+                }
+              />
+            </div>
+            <SetupField
+              label="Preferred tone"
+              value={draft.preferred_tone}
+              disabled={isSaving}
+              onChange={(value) => updateDraft("preferred_tone", value)}
+            />
+          </SetupSection>
         </div>
       </div>
-
-      <p className="workspace-hint">
-        Product brief. “Our product name” is used later for copy, creative
-        prompts, and publishing — it is not used as a research search term.
-      </p>
-
-      <div className="setup-grid">
-        {/* Our product */}
-        <section className="setup-card">
-          <h3 className="setup-card-title">Our product</h3>
-          <div className="brief-grid">
-            <DetailField
-              label="Our product name"
-              value={project.our_product_name}
-            />
-            <DetailField
-              label="Target country"
-              value={project.target_country}
-            />
-            <DetailField
-              label="Cost price (incl. shipping)"
-              value={project.cost_price_including_shipping}
-            />
-            <DetailField
-              label="Planned sale price"
-              value={project.planned_sale_price}
-            />
-            <DetailField label="Current offer" value={project.current_offer} />
-          </div>
-          <div className="setup-links">
-            <span className="detail-field-label">Supplier product URL</span>
-            {supplierLink ? (
-              <CompetitorLinkRow link={supplierLink} />
-            ) : (
-              <span className="detail-field-value is-empty">—</span>
-            )}
-          </div>
-          <DetailField
-            label="Supplier product description"
-            value={project.supplier_product_description}
-            multiline
-          />
-        </section>
-
-        {/* Competitor facts */}
-        <section className="setup-card">
-          <h3 className="setup-card-title">Competitor facts</h3>
-          <div className="setup-links">
-            <span className="detail-field-label">Primary competitor</span>
-            {primaryLink ? (
-              <CompetitorLinkRow link={primaryLink} />
-            ) : (
-              <span className="detail-field-value is-empty">—</span>
-            )}
-            {additionalLinks.length > 0 ? (
-              <>
-                <span className="detail-field-label setup-links-sub">
-                  Additional competitors
-                </span>
-                {additionalLinks.map((link, i) => (
-                  <CompetitorLinkRow key={i} link={link} />
-                ))}
-              </>
-            ) : null}
-          </div>
-          <DetailField
-            label="Closest competitor product description"
-            value={project.closest_competitor_product_description}
-            multiline
-          />
-        </section>
-
-        {/* Research assumptions */}
-        <section className="setup-card">
-          <h3 className="setup-card-title">Research assumptions (seeds)</h3>
-          <div className="brief-grid">
-            <DetailField
-              label="Initial problem hypothesis"
-              value={project.initial_problem_hypothesis}
-              multiline
-            />
-            <DetailField
-              label="Initial customer hypothesis"
-              value={project.initial_customer_hypothesis}
-              multiline
-            />
-            <DetailField
-              label="Preferred tone"
-              value={project.preferred_tone}
-            />
-          </div>
-          <p className="setup-note">
-            Hypotheses are optional seeds only. Preferred tone does not override
-            research-derived tone.
-          </p>
-        </section>
-      </div>
-    </div>
+    </form>
   );
 }

@@ -7,6 +7,7 @@ interface ResearchSourceCardProps {
   source: ResearchSource;
   tags: ResearchTagId[];
   onToggleTag: (tag: ResearchTagId) => void;
+  isNew?: boolean;
 }
 
 const MAX_VISIBLE_PHRASES = 8;
@@ -15,6 +16,7 @@ export function ResearchSourceCard({
   source,
   tags,
   onToggleTag,
+  isNew = false,
 }: ResearchSourceCardProps) {
   const phrases = source.useful_phrases.slice(0, MAX_VISIBLE_PHRASES);
   const extraPhrases = source.useful_phrases.length - phrases.length;
@@ -28,6 +30,7 @@ export function ResearchSourceCard({
         <h4 className="research-card-title">
           {source.title || "Untitled source"}
         </h4>
+        {isNew ? <span className="meta-chip meta-chip-ai">New</span> : null}
       </header>
 
       <div className="research-card-meta">

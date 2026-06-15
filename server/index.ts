@@ -37,7 +37,16 @@ import {
 } from "./ad-image-storage";
 import { generateCreativePrompts } from "./creative-prompts";
 import { generateTofConcepts } from "./tof-concepts";
+import {
+  sendTofGenerateError,
+  TOF_MISSING_TABLE_DETAILS,
+} from "./tof-errors";
 import { withAiUsage, withAiUsageSafe } from "./ai-usage";
+import {
+  RESEARCH_BATCH_SIZE,
+  dedupeResearchDrafts,
+  loadProjectResearchSources,
+} from "./research-helpers";
 import {
   getAllProjectAiCostTotals,
   getProjectAiUsageSummary,
@@ -118,11 +127,23 @@ app.get("/api/ai-usage/project-totals", async (_req, res) => {
 });
 
 app.post("/api/research/run", async (req, res) => {
-  const projectId = (req.body as { projectId?: unknown })?.projectId;
+  const body = req.body as {
+    projectId?: unknown;
+    mode?: unknown;
+    batchSize?: unknown;
+  };
+  const projectId = body.projectId;
 
   if (typeof projectId !== "string" || projectId.trim().length === 0) {
     return res.status(400).json({ error: "Missing or invalid 'projectId'." });
   }
+
+  const batchSize =
+    typeof body.batchSize === "number" &&
+    Number.isFinite(body.batchSize) &&
+    body.batchSize > 0
+      ? Math.min(Math.floor(body.batchSize), 10)
+      : RESEARCH_BATCH_SIZE;
 
   // Fail fast on missing config with clear messages.
   if (!process.env.OPENAI_API_KEY) {
@@ -152,6 +173,20 @@ app.post("/api/research/run", async (req, res) => {
   }
 
   const project = normalizeProject(projectData as ProductProject);
+
+  let existingSources: ResearchSource[] = [];
+  try {
+    existingSources = await loadProjectResearchSources(supabase, project.id);
+  } catch (error: unknown) {
+    return res.status(500).json({ error: errorMessage(error) });
+  }
+
+  let mode: "initial" | "append";
+  if (body.mode === "initial" || body.mode === "append") {
+    mode = body.mode;
+  } else {
+    mode = existingSources.length > 0 ? "append" : "initial";
+  }
 
   // 2. Create a research_runs row (status: running, stage: research).
   const { data: runData, error: runError } = await supabase
@@ -185,7 +220,12 @@ app.post("/api/research/run", async (req, res) => {
   try {
     ({ drafts, aiUsage: researchAiUsage } = await runResearchForProject(
       project,
-      run.id
+      {
+        mode,
+        batchSize,
+        existingSources: mode === "append" ? existingSources : [],
+        researchRunId: run.id,
+      }
     ));
   } catch (error: unknown) {
     const message = errorMessage(error);
@@ -198,11 +238,37 @@ app.post("/api/research/run", async (req, res) => {
         runId: run.id,
       });
     }
+
+    if (error instanceof OpenAIUpstreamError) {
+      return res.status(error.status ?? 502).json({
+        error: message,
+        details: error.details,
+        runId: run.id,
+      });
+    }
+
     return res.status(502).json({ error: message, runId: run.id });
   }
 
+  const { accepted, skippedUrls, skippedTitles } = dedupeResearchDrafts(
+    drafts,
+    existingSources
+  );
+
+  if (accepted.length === 0) {
+    const message =
+      skippedUrls + skippedTitles > 0
+        ? "All returned sources were duplicates of sources already saved for this project."
+        : "OpenAI did not return any usable research sources.";
+    await markRunFailed(message);
+    return res.status(502).json({
+      error: message,
+      runId: run.id,
+    });
+  }
+
   // 8. Save each source into research_sources.
-  const rows = drafts.map((draft) => ({
+  const rows = accepted.map((draft) => ({
     run_id: run.id,
     project_id: project.id,
     url: draft.url,
@@ -227,7 +293,18 @@ app.post("/api/research/run", async (req, res) => {
     });
   }
 
-  const sources = (insertedData ?? []) as ResearchSource[];
+  const newSources = (insertedData ?? []) as ResearchSource[];
+
+  let allSources: ResearchSource[];
+  try {
+    allSources = await loadProjectResearchSources(supabase, project.id);
+  } catch (error: unknown) {
+    allSources = [...existingSources, ...newSources];
+    console.warn(
+      "[research] Failed to reload all project sources:",
+      errorMessage(error)
+    );
+  }
 
   // 9. Mark the run completed.
   const { data: completedData } = await supabase
@@ -242,9 +319,30 @@ app.post("/api/research/run", async (req, res) => {
     status: "completed",
   };
 
+  let warning: string | undefined;
+  if (accepted.length < batchSize) {
+    const skipped = skippedUrls + skippedTitles;
+    warning =
+      skipped > 0
+        ? `Saved ${accepted.length} of ${batchSize} requested sources (${skipped} duplicate${skipped === 1 ? "" : "s"} skipped).`
+        : `Saved ${accepted.length} of ${batchSize} requested sources.`;
+  } else if (skippedUrls + skippedTitles > 0) {
+    warning = `${skippedUrls + skippedTitles} duplicate source${skippedUrls + skippedTitles === 1 ? "" : "s"} were skipped before saving.`;
+  }
+
   // 10. Return the saved sources (and run) to the frontend.
   return res.json(
-    withAiUsage({ run: completedRun, sources }, researchAiUsage)
+    withAiUsage(
+      {
+        run: completedRun,
+        sources: allSources,
+        new_sources: newSources,
+        total_sources: allSources.length,
+        mode,
+        ...(warning ? { warning } : {}),
+      },
+      researchAiUsage
+    )
   );
 });
 
@@ -283,7 +381,28 @@ app.post("/api/insights/generate", async (req, res) => {
 
   const project = normalizeProject(projectData as ProductProject);
 
-  // 3. Load the latest completed research run for the "research" stage.
+  // 3. Load all saved research sources for the project.
+  let sources: ResearchSource[];
+  try {
+    sources = await loadProjectResearchSources(supabase, project.id);
+  } catch (error: unknown) {
+    return res.status(500).json({ error: errorMessage(error) });
+  }
+
+  if (sources.length === 0) {
+    return res.status(400).json({
+      error: "No research sources found. Please run research first.",
+    });
+  }
+
+  if (sources.length < 5) {
+    return res.status(400).json({
+      error:
+        "At least 5 research sources are required before generating an insight report.",
+    });
+  }
+
+  // Link the insight to the latest completed research run when available.
   const { data: runData, error: runError } = await supabase
     .from("research_runs")
     .select("*")
@@ -300,35 +419,16 @@ app.post("/api/insights/generate", async (req, res) => {
     });
   }
 
-  if (!runData) {
-    return res.status(400).json({
-      error: "No completed research found. Please run research first.",
-    });
-  }
-
-  const run = runData as ResearchRun;
-
-  // 4. Load the sources attached to that run.
-  const { data: sourcesData, error: sourcesError } = await supabase
-    .from("research_sources")
-    .select("*")
-    .eq("run_id", run.id)
-    .order("relevance_score", { ascending: false });
-
-  if (sourcesError) {
-    return res.status(500).json({
-      error: `Failed to load research sources: ${sourcesError.message}`,
-    });
-  }
-
-  const sources = (sourcesData ?? []) as ResearchSource[];
-
-  // 5. No sources -> tell the user to run research first.
-  if (sources.length === 0) {
-    return res.status(400).json({
-      error: "No research sources found. Please run research first.",
-    });
-  }
+  const run: ResearchRun =
+    (runData as ResearchRun | null) ??
+    ({
+      id: sources[sources.length - 1]?.run_id ?? "",
+      project_id: project.id,
+      stage: "research",
+      status: "completed",
+      created_at: sources[sources.length - 1]?.created_at ?? new Date().toISOString(),
+      error: null,
+    } as ResearchRun);
 
   // 6-7. Analyse the sources with OpenAI.
   let report;
@@ -435,20 +535,10 @@ app.post("/api/avatar/generate", async (req, res) => {
   const insight = insightData as ResearchInsight;
 
   let sources: ResearchSource[] = [];
-  if (insight.run_id) {
-    const { data: sourcesData, error: sourcesError } = await supabase
-      .from("research_sources")
-      .select("*")
-      .eq("run_id", insight.run_id)
-      .order("relevance_score", { ascending: false });
-
-    if (sourcesError) {
-      return res.status(500).json({
-        error: `Failed to load research sources: ${sourcesError.message}`,
-      });
-    }
-
-    sources = (sourcesData ?? []) as ResearchSource[];
+  try {
+    sources = await loadProjectResearchSources(supabase, project.id);
+  } catch (error: unknown) {
+    return res.status(500).json({ error: errorMessage(error) });
   }
 
   let avatarContent;
@@ -2185,19 +2275,27 @@ async function handleGenerateTofConcepts(
       );
     } catch (error: unknown) {
       if (error instanceof OpenAIUpstreamError) {
-        res.status(502).json({
-          error: error.message,
-          status: error.status ?? 520,
-          details: error.details,
+        sendTofGenerateError(res, {
+          stage: "openai",
+          details: error.details?.trim() || error.message,
+          httpStatus: 502,
         });
         return;
       }
       const message = errorMessage(error);
       if (error instanceof ResearchParseError) {
-        res.status(502).json({ error: message, raw: error.rawText });
+        sendTofGenerateError(res, {
+          stage: "parse",
+          details: message,
+          httpStatus: 502,
+        });
         return;
       }
-      res.status(502).json({ error: message });
+      sendTofGenerateError(res, {
+        stage: "unknown",
+        details: message,
+        httpStatus: 502,
+      });
       return;
     }
 
@@ -2209,8 +2307,11 @@ async function handleGenerateTofConcepts(
       .eq("mass_desire_id", massDesireId);
 
     if (deleteSetError && !isMissingTableError(deleteSetError.message, deleteSetError.code)) {
-      res.status(500).json({
-        error: `Failed to clear old TOF concepts: ${deleteSetError.message}`,
+      sendTofGenerateError(res, {
+        stage: "save",
+        details: `Failed to clear old TOF concepts: ${deleteSetError.message}`,
+        httpStatus: 500,
+        aiUsageSummaries: generated.aiUsage,
       });
       return;
     }
@@ -2231,29 +2332,42 @@ async function handleGenerateTofConcepts(
     if (insertSetError || !insertedSet) {
       const msg = insertSetError?.message ?? "unknown error";
       if (isMissingTableError(msg, insertSetError?.code)) {
-        res.status(500).json({ error: DESIRE_CONCEPTS_SQL_HINT });
+        sendTofGenerateError(res, {
+          stage: "save",
+          details: TOF_MISSING_TABLE_DETAILS,
+          httpStatus: 500,
+          aiUsageSummaries: generated.aiUsage,
+        });
         return;
       }
-      res.status(500).json({
-        error: `Failed to save TOF concept set: ${msg}`,
+      sendTofGenerateError(res, {
+        stage: "save",
+        details: `Failed to save TOF concept set: ${msg}`,
+        httpStatus: 500,
+        aiUsageSummaries: generated.aiUsage,
       });
       return;
     }
 
-    const conceptRows = generated.concepts.map((concept, index) => ({
-      concept_set_id: insertedSet.id,
-      project_id: project.id,
-      mass_desire_id: massDesire.id,
-      concept_number: index + 1,
-      concept_title: concept.concept_title,
-      headline: concept.headline,
-      support_line: concept.support_line,
-      overlay_recommendation: concept.overlay_recommendation,
-      visual_strategy: concept.visual_strategy,
-      rationale: concept.rationale,
-      image_prompt: concept.image_prompt,
-      updated_at: now,
-    }));
+    const conceptRows = generated.concepts.map((concept, index) => {
+      const headline = concept.headline.trim();
+      const conceptTitle =
+        headline.length > 80 ? `${headline.slice(0, 79).trimEnd()}…` : headline;
+      return {
+        concept_set_id: insertedSet.id,
+        project_id: project.id,
+        mass_desire_id: massDesire.id,
+        concept_number: index + 1,
+        concept_title: conceptTitle || `TOF Ad ${index + 1}`,
+        headline: concept.headline,
+        support_line: concept.description,
+        overlay_recommendation: "none" as const,
+        visual_strategy: concept.visual_strategy,
+        rationale: concept.primary,
+        image_prompt: concept.image_prompt,
+        updated_at: now,
+      };
+    });
 
     const { data: insertedConcepts, error: insertConceptsError } = await supabase
       .from("desire_concepts")
@@ -2263,11 +2377,19 @@ async function handleGenerateTofConcepts(
     if (insertConceptsError || !insertedConcepts) {
       const msg = insertConceptsError?.message ?? "unknown error";
       if (isMissingTableError(msg, insertConceptsError?.code)) {
-        res.status(500).json({ error: DESIRE_CONCEPTS_SQL_HINT });
+        sendTofGenerateError(res, {
+          stage: "save",
+          details: TOF_MISSING_TABLE_DETAILS,
+          httpStatus: 500,
+          aiUsageSummaries: generated.aiUsage,
+        });
         return;
       }
-      res.status(500).json({
-        error: `Failed to save TOF concepts: ${msg}`,
+      sendTofGenerateError(res, {
+        stage: "save",
+        details: `Failed to save TOF concepts: ${msg}`,
+        httpStatus: 500,
+        aiUsageSummaries: generated.aiUsage,
       });
       return;
     }
@@ -2279,11 +2401,14 @@ async function handleGenerateTofConcepts(
       ),
     };
 
-    res.json(withAiUsage({ conceptSet }, generated.aiUsage));
+    res.json(withAiUsageSafe({ conceptSet }, generated.aiUsage));
   } catch (error: unknown) {
     console.error("[api] TOF concept generation failed:", error);
-    res.status(500).json({
-      error: errorMessage(error) || "Unexpected server error during TOF generation.",
+    sendTofGenerateError(res, {
+      stage: "unknown",
+      details:
+        errorMessage(error) || "Unexpected server error during TOF generation.",
+      httpStatus: 500,
     });
   }
 }

@@ -1,44 +1,24 @@
 import type { AiUsageSummary } from "../types";
+import {
+  formatAiFailureStage,
+  isAiFailureStage,
+  type AiFailureStage,
+} from "./aiFailureStage";
 
-export type CopyFailureStage =
-  | "openai"
-  | "parse"
-  | "validation"
-  | "save"
-  | "response"
-  | "unknown";
+/** @deprecated Use AiFailureStage */
+export type CopyFailureStage = AiFailureStage;
 
 export interface CopyGenerateErrorResponse {
   error: string;
-  stage: CopyFailureStage;
+  stage: AiFailureStage;
   status: number;
   details: string;
   ai_usage?: AiUsageSummary;
   debug_ref?: string;
 }
 
-const STAGE_LABELS: Record<CopyFailureStage, string> = {
-  openai: "OpenAI",
-  parse: "Parse",
-  validation: "Validation",
-  save: "Save",
-  response: "Response",
-  unknown: "Unknown",
-};
-
-export function formatCopyFailureStage(stage: CopyFailureStage): string {
-  return STAGE_LABELS[stage] ?? "Unknown";
-}
-
-function isCopyFailureStage(value: unknown): value is CopyFailureStage {
-  return (
-    value === "openai" ||
-    value === "parse" ||
-    value === "validation" ||
-    value === "save" ||
-    value === "response" ||
-    value === "unknown"
-  );
+export function formatCopyFailureStage(stage: AiFailureStage): string {
+  return formatAiFailureStage(stage);
 }
 
 export function parseCopyGenerateError(
@@ -49,7 +29,7 @@ export function parseCopyGenerateError(
   const record = payload as Record<string, unknown>;
   if (record.error !== "Generate Copy failed") return null;
 
-  const stage = isCopyFailureStage(record.stage) ? record.stage : "unknown";
+  const stage = isAiFailureStage(record.stage) ? record.stage : "unknown";
   const details =
     typeof record.details === "string" && record.details.trim().length > 0
       ? record.details.trim()

@@ -6,6 +6,8 @@ import {
   Archive,
   UserRound,
   ImageIcon,
+  Eye,
+  Send,
 } from "lucide-react";
 import type { ModeStatus, WorkflowMode } from "./workflow";
 import { WORKFLOW_MODES } from "./workflow";
@@ -19,6 +21,8 @@ const MODE_ICONS: Record<WorkflowMode, typeof Search> = {
   avatar: UserRound,
   strategy: Layers,
   ads: ImageIcon,
+  view_ads: Eye,
+  publish_ads: Send,
   additional: Archive,
 };
 

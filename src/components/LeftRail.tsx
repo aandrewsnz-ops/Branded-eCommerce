@@ -9,9 +9,16 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import type { ProductProject, ProductProjectInput, ProjectAiUsageSummary, ProjectAiCostTotal } from "../types";
+import { displayYourStoreUrl } from "../lib/projectSetupFields";
+import type {
+  ProductProject,
+  ProductProjectInput,
+  ProjectAiUsageSummary,
+  ProjectAiCostTotal,
+} from "../types";
 import type { ModeStatus, WorkflowMode } from "./workflow";
 import { WorkflowNav } from "./WorkflowNav";
+import { ThemeSelector } from "./ThemeSelector";
 import { formatAiCost } from "../lib/aiUsageFormat";
 
 interface LeftRailProps {
@@ -39,6 +46,23 @@ interface LeftRailProps {
   projectAiUsage: ProjectAiUsageSummary | null;
   projectCostById: Record<string, ProjectAiCostTotal>;
 }
+
+const YOUR_STORE_FIELDS: {
+  key: keyof ProductProjectInput;
+  label: string;
+  placeholder?: string;
+}[] = [
+  {
+    key: "your_store_name",
+    label: "Your store name",
+    placeholder: "Westward Vault",
+  },
+  {
+    key: "your_store_url",
+    label: "Your store URL",
+    placeholder: "https://westwardvault.com",
+  },
+];
 
 const BRIEF_FIELDS: {
   key: keyof ProductProjectInput;
@@ -142,6 +166,22 @@ export function LeftRail({
                 <span>{createError}</span>
               </div>
             ) : null}
+            <p className="brief-form-section-label">Your store branding</p>
+            <p className="brief-form-section-hint">
+              Optional. Used later for ad previews — not in research prompts.
+            </p>
+            {YOUR_STORE_FIELDS.map((field) => (
+              <label key={field.key} className="brief-field">
+                <span className="brief-field-label">{field.label}</span>
+                <input
+                  className="brief-input"
+                  value={form[field.key]}
+                  placeholder={field.placeholder}
+                  onChange={(e) => onUpdateField(field.key, e.target.value)}
+                />
+              </label>
+            ))}
+            <p className="brief-form-section-label">Product brief</p>
             {BRIEF_FIELDS.map((field) =>
               field.multiline ? (
                 <label key={field.key} className="brief-field">
@@ -217,7 +257,7 @@ export function LeftRail({
                         </span>
                       ) : null}
                       {aiCostLabel ? (
-                        <span className="meta-chip meta-chip-ai">
+                        <span className="meta-chip meta-chip-cost">
                           AI {aiCostLabel}
                         </span>
                       ) : null}
@@ -271,6 +311,14 @@ export function LeftRail({
               value={selectedProject.planned_sale_price}
             />
             <RailSummaryRow
+              label="Your store"
+              value={selectedProject.your_store_name ?? ""}
+            />
+            <RailSummaryRow
+              label="Your store URL"
+              value={displayYourStoreUrl(selectedProject.your_store_url)}
+            />
+            <RailSummaryRow
               label="AI cost"
               value={formatAiCost(projectAiUsage?.total_cost_usd, {
                 showZero: true,
@@ -288,6 +336,7 @@ export function LeftRail({
           onChange={onChangeMode}
           projectAiUsage={projectAiUsage}
         />
+        <ThemeSelector />
       </div>
     </aside>
   );

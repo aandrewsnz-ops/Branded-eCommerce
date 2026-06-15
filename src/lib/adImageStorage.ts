@@ -88,6 +88,137 @@ function storagePermissionMessage(error: unknown): string {
   return message;
 }
 
+/** Storage path for TOF concept images under projects/{id}/tof/{massDesireId}/. */
+export function buildTofImageStoragePath(
+  projectId: string,
+  massDesireId: string,
+  safeFilename: string,
+  withTimestampSuffix = false
+): string {
+  const ext = safeFilename.includes(".")
+    ? safeFilename.split(".").pop() ?? "png"
+    : "png";
+  const base = safeFilename.replace(/\.[^.]+$/, "");
+  if (withTimestampSuffix) {
+    return `projects/${projectId}/tof/${massDesireId}/${base}-${Date.now()}.${ext}`;
+  }
+  return `projects/${projectId}/tof/${massDesireId}/${safeFilename}`;
+}
+
+/** Upload a TOF concept image to Supabase Storage. */
+export async function uploadTofAdImage(
+  file: File,
+  projectId: string,
+  massDesireId: string,
+  safeFilename: string,
+  existingPath?: string
+): Promise<AdImageUploadMeta> {
+  if (!isSupabaseConfigured || !supabase) {
+    throw new Error("Supabase is not configured.");
+  }
+
+  const validationError = validateAdImageFile(file);
+  if (validationError) {
+    throw new Error(validationError);
+  }
+
+  if (existingPath?.trim()) {
+    try {
+      await deleteAdImage(existingPath);
+    } catch {
+      // Replacing with a new path is fine even if the old object is already gone.
+    }
+  }
+
+  const extension = extensionForFile(file);
+  const filename =
+    safeFilename.trim().replace(/^.*[/\\]/, "") ||
+    `tof-upload-${Date.now()}.${extension}`;
+
+  let path = buildTofImageStoragePath(projectId, massDesireId, filename);
+  let uploadError = (
+    await supabase.storage.from(AD_IMAGES_BUCKET).upload(path, file, {
+      upsert: false,
+      contentType:
+        file.type || `image/${extension === "jpg" ? "jpeg" : extension}`,
+    })
+  ).error;
+
+  if (uploadError && /already exists|duplicate/i.test(uploadError.message)) {
+    path = buildTofImageStoragePath(
+      projectId,
+      massDesireId,
+      filename,
+      true
+    );
+    uploadError = (
+      await supabase.storage.from(AD_IMAGES_BUCKET).upload(path, file, {
+        upsert: false,
+        contentType:
+          file.type || `image/${extension === "jpg" ? "jpeg" : extension}`,
+      })
+    ).error;
+  }
+
+  if (uploadError) {
+    throw new Error(storagePermissionMessage(uploadError));
+  }
+
+  return {
+    image_url: getAdImagePublicUrl(path),
+    image_path: path,
+    image_filename: path.split("/").pop() ?? filename,
+    image_uploaded_at: new Date().toISOString(),
+    image_file_type:
+      file.type || `image/${extension === "jpg" ? "jpeg" : extension}`,
+  };
+}
+
+import type { DesireConcept } from "../types";
+
+/** Remove image metadata from a TOF concept (does not delete storage). */
+export function clearTofImageFields(concept: DesireConcept): DesireConcept {
+  const next = { ...concept };
+  delete next.image_url;
+  delete next.image_path;
+  delete next.image_filename;
+  delete next.image_uploaded_at;
+  delete next.image_file_type;
+  return next;
+}
+
+/** Copy optional uploaded-image fields from a stored TOF concept row. */
+export function readTofImageFields(
+  source: Partial<{
+    image_url?: string | null;
+    image_path?: string | null;
+    image_filename?: string | null;
+    image_uploaded_at?: string | null;
+    image_file_type?: string | null;
+  }>
+): AdImageUploadMeta | Record<string, never> {
+  const fields: Partial<AdImageUploadMeta> = {};
+  if (typeof source.image_url === "string" && source.image_url.trim()) {
+    fields.image_url = source.image_url;
+  }
+  if (typeof source.image_path === "string" && source.image_path.trim()) {
+    fields.image_path = source.image_path;
+  }
+  if (typeof source.image_filename === "string" && source.image_filename.trim()) {
+    fields.image_filename = source.image_filename;
+  }
+  if (
+    typeof source.image_uploaded_at === "string" &&
+    source.image_uploaded_at.trim()
+  ) {
+    fields.image_uploaded_at = source.image_uploaded_at;
+  }
+  if (typeof source.image_file_type === "string" && source.image_file_type.trim()) {
+    fields.image_file_type = source.image_file_type;
+  }
+  return fields as AdImageUploadMeta | Record<string, never>;
+}
+
 /** Upload an ad image to Supabase Storage and return metadata for ad_variations. */
 export async function uploadAdImage(
   file: File,
