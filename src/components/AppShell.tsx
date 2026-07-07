@@ -12,6 +12,8 @@ import type {
   MassDesire,
   ProductProject,
   ProductProjectInput,
+  ProductPageSection,
+  ProductPageSet,
   ProjectAiUsageSummary,
   ProjectAiCostTotal,
   ResearchInsight,
@@ -28,6 +30,7 @@ import { StrategyWorkspace } from "./StrategyWorkspace";
 import { AdsWorkspace } from "./AdsWorkspace";
 import { ViewAdsWorkspace } from "./ViewAdsWorkspace";
 import { PublishAdsWorkspace } from "./PublishAdsWorkspace";
+import { ProductPageWorkspace } from "./ProductPageWorkspace";
 import { AdditionalContentWorkspace } from "./AdditionalContentWorkspace";
 
 export interface AppShellProps {
@@ -69,6 +72,15 @@ export interface AppShellProps {
   conceptSets: DesireConceptSet[];
   creativePromptSets: CreativePromptSet[];
   adCandidates: AdCandidate[];
+
+  productPageSet: ProductPageSet | null;
+  isCreatingProductPageTemplate: boolean;
+  productPageError: string | null;
+  onCreateProductPageTemplate: () => void;
+  onPatchProductPageSection: (
+    sectionId: string,
+    patch: Partial<ProductPageSection>
+  ) => Promise<void>;
 
   // Loading / generating / errors
   isResearching: boolean;
@@ -248,6 +260,19 @@ export function AppShell(props: AppShellProps) {
             angles={props.angles}
             copySets={props.copySets}
             onGoToReviewAds={() => props.onChangeMode("ads")}
+          />
+        );
+      case "product_page":
+        return (
+          <ProductPageWorkspace
+            key={selectedProject.id}
+            projectId={selectedProject.id}
+            productPageSet={props.productPageSet}
+            isCreating={props.isCreatingProductPageTemplate}
+            error={props.productPageError}
+            canCreate={Boolean(selectedProject)}
+            onCreate={props.onCreateProductPageTemplate}
+            onPatchSection={props.onPatchProductPageSection}
           />
         );
       case "additional":

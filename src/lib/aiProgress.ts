@@ -7,7 +7,8 @@ export type AiOperation =
   | "generate_copy"
   | "regenerate_ad"
   | "regenerate_image_prompt"
-  | "tof_concepts";
+  | "tof_concepts"
+  | "product_page";
 
 export const AI_PROGRESS_MAX_SECONDS = 90;
 
@@ -17,12 +18,18 @@ export const AI_PROGRESS_MAX_SECONDS_GENERATE_COPY = 240;
 /** Research uses web search and may run up to ~4 minutes. */
 export const AI_PROGRESS_MAX_SECONDS_RESEARCH = 240;
 
+/** Product page generation may include many sections. */
+export const AI_PROGRESS_MAX_SECONDS_PRODUCT_PAGE = 120;
+
 export function getOperationMaxSeconds(operation: AiOperation): number {
   if (operation === "generate_copy") {
     return AI_PROGRESS_MAX_SECONDS_GENERATE_COPY;
   }
   if (operation === "research" || operation === "research_append") {
     return AI_PROGRESS_MAX_SECONDS_RESEARCH;
+  }
+  if (operation === "product_page") {
+    return AI_PROGRESS_MAX_SECONDS_PRODUCT_PAGE;
   }
   return AI_PROGRESS_MAX_SECONDS;
 }
@@ -202,6 +209,24 @@ export const AI_OPERATION_CONFIG: Record<AiOperation, AiOperationConfig> = {
       "Waiting for AI response",
       "Validating ad structure",
       "Saving copy pack",
+    ],
+  },
+  product_page: {
+    id: "product_page",
+    title: "Generating product page",
+    successTitle: "Product page generated",
+    errorTitle: "Product page generation failed",
+    description:
+      "Creating Shopify-ready product page sections, UGC image prompts, and export-ready Custom Liquid placeholders.",
+    reassurance:
+      "The model is planning multiple standalone Shopify sections from your research and strategy.",
+    technicalDetail: "Large structured JSON product page plan",
+    steps: [
+      "Preparing research and strategy context",
+      "Sending product page prompt",
+      "Waiting for AI response",
+      "Validating sections and image prompts",
+      "Saving product page template",
     ],
   },
 };

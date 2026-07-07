@@ -343,3 +343,89 @@ export function readAdImageFields(source: Partial<AdVariation>): Pick<
   }
   return fields;
 }
+
+/** Storage path for product page section images. */
+export function buildProductPageImageStoragePath(
+  projectId: string,
+  sectionId: string,
+  safeFilename: string,
+  withTimestampSuffix = false
+): string {
+  const ext = safeFilename.includes(".")
+    ? safeFilename.split(".").pop() ?? "png"
+    : "png";
+  const base = safeFilename.replace(/\.[^.]+$/, "");
+  if (withTimestampSuffix) {
+    return `projects/${projectId}/product-page/${sectionId}/${base}-${Date.now()}.${ext}`;
+  }
+  return `projects/${projectId}/product-page/${sectionId}/${safeFilename}`;
+}
+
+/** Upload a product page section image to Supabase Storage. */
+export async function uploadProductPageImage(
+  file: File,
+  projectId: string,
+  sectionId: string,
+  safeFilename: string,
+  existingPath?: string
+): Promise<AdImageUploadMeta> {
+  if (!isSupabaseConfigured || !supabase) {
+    throw new Error("Supabase is not configured.");
+  }
+
+  const validationError = validateAdImageFile(file);
+  if (validationError) {
+    throw new Error(validationError);
+  }
+
+  if (existingPath?.trim()) {
+    try {
+      await deleteAdImage(existingPath);
+    } catch {
+      // Continue even if old object is already gone.
+    }
+  }
+
+  const extension = extensionForFile(file);
+  const filename =
+    safeFilename.trim().replace(/^.*[/\\]/, "") ||
+    `product-page-${Date.now()}.${extension}`;
+
+  let path = buildProductPageImageStoragePath(projectId, sectionId, filename);
+  let uploadError = (
+    await supabase.storage.from(AD_IMAGES_BUCKET).upload(path, file, {
+      upsert: false,
+      contentType:
+        file.type || `image/${extension === "jpg" ? "jpeg" : extension}`,
+    })
+  ).error;
+
+  if (uploadError && /already exists|duplicate/i.test(uploadError.message)) {
+    path = buildProductPageImageStoragePath(
+      projectId,
+      sectionId,
+      filename,
+      true
+    );
+    uploadError = (
+      await supabase.storage.from(AD_IMAGES_BUCKET).upload(path, file, {
+        upsert: false,
+        contentType:
+          file.type || `image/${extension === "jpg" ? "jpeg" : extension}`,
+      })
+    ).error;
+  }
+
+  if (uploadError) {
+    throw new Error(storagePermissionMessage(uploadError));
+  }
+
+  return {
+    image_url: getAdImagePublicUrl(path),
+    image_path: path,
+    image_filename: path.split("/").pop() ?? filename,
+    image_uploaded_at: new Date().toISOString(),
+    image_file_type:
+      file.type || `image/${extension === "jpg" ? "jpeg" : extension}`,
+  };
+}

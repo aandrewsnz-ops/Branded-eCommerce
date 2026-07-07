@@ -23,6 +23,9 @@ import {
 } from "./desires";
 import {
   generateMarketingAngles,
+  validateAngleGroups,
+  validateSingleDesireResult,
+  AngleValidationError,
   EXPECTED_ANGLES_PER_DESIRE,
 } from "./angles";
 import { generateAdCopy, regenerateAd, regenerateImagePrompt } from "./copy";
@@ -38,10 +41,20 @@ import {
 import { generateCreativePrompts } from "./creative-prompts";
 import { generateTofConcepts } from "./tof-concepts";
 import {
+  generateProductPage,
+  mergeProductPageSection,
+  buildStarterProductPageContent,
+  saveProductPageSet,
+  PRODUCT_PAGE_MISSING_TABLE_DETAILS,
+  isMissingProductPageTable,
+  OpenAIUpstreamError as ProductPageOpenAIError,
+  ResearchParseError as ProductPageParseError,
+} from "./product-page";
+import {
   sendTofGenerateError,
   TOF_MISSING_TABLE_DETAILS,
 } from "./tof-errors";
-import { withAiUsage, withAiUsageSafe } from "./ai-usage";
+import { withAiUsage, withAiUsageSafe, type AiUsageSummary } from "./ai-usage";
 import {
   RESEARCH_BATCH_SIZE,
   dedupeResearchDrafts,
@@ -62,7 +75,11 @@ import type {
   MassDesire,
   MassDesireWithAngles,
   MarketingAngle,
+  MarketingAnglesContent,
   ProductProject,
+  ProductPageContent,
+  ProductPageSet,
+  ProductPageSection,
   ResearchInsight,
   ResearchRun,
   ResearchSource,
@@ -836,22 +853,87 @@ app.post("/api/angles/generate", async (req, res) => {
     });
   }
 
-  let anglesContent;
-  let anglesAiUsage;
-  try {
-    ({ content: anglesContent, aiUsage: anglesAiUsage } =
-      await generateMarketingAngles(
-      project,
-      insight,
-      avatarOutput.content_json,
-      massDesires
-    ));
-  } catch (error: unknown) {
-    const message = errorMessage(error);
-    if (error instanceof ResearchParseError) {
-      return res.status(502).json({ error: message, raw: error.rawText });
+  const allAngleGroups: MarketingAnglesContent["angle_groups"] = [];
+  const anglesAiUsage: AiUsageSummary[] = [];
+
+  for (let desireIndex = 0; desireIndex < massDesires.length; desireIndex++) {
+    const desire = massDesires[desireIndex];
+    const desireStartedAt = Date.now();
+
+    console.log("[ANGLES] Generating angles for desire", {
+      desire_index: desireIndex,
+      desire_id: desire.id,
+    });
+
+    try {
+      const { content, aiUsage } = await generateMarketingAngles(
+        project,
+        insight,
+        avatarOutput.content_json,
+        [desire]
+      );
+
+      try {
+        validateSingleDesireResult(content, desire);
+      } catch (validationError: unknown) {
+        return res.status(502).json({
+          stage: "validation",
+          failed_desire_id: desire.id,
+          failed_desire_index: desireIndex,
+          error: errorMessage(validationError),
+        });
+      }
+
+      const outputCount = content.angle_groups.reduce(
+        (sum, group) => sum + group.angles.length,
+        0
+      );
+      const responseChars = JSON.stringify(content).length;
+
+      console.log("[ANGLES] Generated angles for desire", {
+        desire_index: desireIndex,
+        desire_id: desire.id,
+        output_count: outputCount,
+        duration_ms: Date.now() - desireStartedAt,
+        response_chars: responseChars,
+      });
+
+      allAngleGroups.push(...content.angle_groups);
+      anglesAiUsage.push(...aiUsage);
+    } catch (error: unknown) {
+      const message = errorMessage(error);
+
+      if (error instanceof AngleValidationError) {
+        return res.status(502).json({
+          stage: "validation",
+          failed_desire_id: desire.id,
+          failed_desire_index: desireIndex,
+          error: message,
+        });
+      }
+
+      const failurePayload: Record<string, unknown> = {
+        stage: "openai_or_parse",
+        failed_desire_id: desire.id,
+        failed_desire_index: desireIndex,
+        error: message,
+      };
+      if (error instanceof ResearchParseError) {
+        failurePayload.raw = error.rawText;
+      }
+      return res.status(502).json(failurePayload);
     }
-    return res.status(502).json({ error: message });
+  }
+
+  const anglesContent = { angle_groups: allAngleGroups };
+
+  try {
+    validateAngleGroups(anglesContent, massDesires);
+  } catch (error: unknown) {
+    return res.status(502).json({
+      stage: "validation",
+      error: errorMessage(error),
+    });
   }
 
   const expectedTotal =
@@ -863,6 +945,7 @@ app.post("/api/angles/generate", async (req, res) => {
 
   if (actualTotal !== expectedTotal) {
     return res.status(502).json({
+      stage: "validation",
       error: `Expected ${expectedTotal} marketing angles (${massDesires.length} desires × ${EXPECTED_ANGLES_PER_DESIRE}), got ${actualTotal}.`,
     });
   }
@@ -2463,6 +2546,408 @@ app.get("/api/tof-concepts", handleGetDesireConcepts);
 app.get("/api/desire-concepts", handleGetDesireConcepts);
 
 /* ==================================================================== */
+/* Product Page (Shopify Custom Liquid export)                          */
+/* ==================================================================== */
+
+function normalizeProductPageSet(row: Record<string, unknown>): ProductPageSet {
+  const content = row.content as ProductPageContent;
+  return {
+    id: String(row.id),
+    project_id: String(row.project_id),
+    content,
+    status: String(row.status ?? "draft"),
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
+  };
+}
+
+async function handleGenerateProductPage(
+  req: express.Request,
+  res: express.Response
+): Promise<void> {
+  const { projectId } = req.body ?? {};
+
+  if (typeof projectId !== "string" || projectId.trim().length === 0) {
+    res.status(400).json({ error: "Missing or invalid 'projectId'." });
+    return;
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    res.status(500).json({ error: "OPENAI_API_KEY is not configured." });
+    return;
+  }
+
+  let supabase: ReturnType<typeof getSupabase>;
+  try {
+    supabase = getSupabase();
+  } catch (error: unknown) {
+    res.status(500).json({ error: errorMessage(error) });
+    return;
+  }
+
+  try {
+    const { data: projectData, error: projectError } = await supabase
+      .from("projects")
+      .select("*")
+      .eq("id", projectId)
+      .single();
+
+    if (projectError || !projectData) {
+      res.status(404).json({
+        error: `Project not found: ${projectError?.message ?? projectId}`,
+      });
+      return;
+    }
+
+    const project = normalizeProject(projectData as ProductProject);
+
+    const { data: insightData, error: insightError } = await supabase
+      .from("research_insights")
+      .select("*")
+      .eq("project_id", project.id)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (insightError || !insightData) {
+      res.status(400).json({
+        error:
+          "No insight report found. Please run Generate Insight Report first.",
+      });
+      return;
+    }
+
+    const insight = insightData as ResearchInsight;
+
+    const { data: avatarData, error: avatarError } = await supabase
+      .from("generated_outputs")
+      .select("*")
+      .eq("project_id", project.id)
+      .eq("output_type", "customer_avatar")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (avatarError || !avatarData) {
+      res.status(400).json({
+        error:
+          "No customer avatar found. Please run Generate Customer Avatar first.",
+      });
+      return;
+    }
+
+    const avatarOutput = avatarData as CustomerAvatarOutput;
+
+    const [
+      { data: desiresData },
+      { data: anglesData },
+      { data: copySetsData },
+      { data: sourcesData },
+    ] = await Promise.all([
+      supabase
+        .from("mass_desires")
+        .select("*")
+        .eq("project_id", project.id)
+        .order("sort_order", { ascending: true }),
+      supabase
+        .from("marketing_angles")
+        .select("*")
+        .eq("project_id", project.id)
+        .order("sort_order", { ascending: true }),
+      supabase
+        .from("ad_copy_sets")
+        .select("*")
+        .eq("project_id", project.id),
+      supabase
+        .from("research_sources")
+        .select("*")
+        .eq("project_id", project.id)
+        .order("relevance_score", { ascending: false })
+        .limit(20),
+    ]);
+
+    const desires = (desiresData ?? []) as MassDesire[];
+    const angles = (anglesData ?? []) as MarketingAngle[];
+    const copySets = (copySetsData ?? []) as AdCopySet[];
+    const sources = (sourcesData ?? []) as ResearchSource[];
+
+    let generated;
+    try {
+      generated = await generateProductPage(
+        project,
+        insight,
+        avatarOutput.content_json,
+        desires,
+        angles,
+        copySets,
+        sources
+      );
+    } catch (error: unknown) {
+      if (error instanceof ProductPageOpenAIError) {
+        res.status(502).json({
+          error: error.message,
+          stage: "openai",
+        });
+        return;
+      }
+      if (error instanceof ProductPageParseError) {
+        res.status(502).json({
+          error: error.message,
+          stage: "parse",
+        });
+        return;
+      }
+      res.status(502).json({
+        error: errorMessage(error),
+        stage: "unknown",
+      });
+      return;
+    }
+
+    let productPageSet: ProductPageSet;
+    try {
+      productPageSet = await saveProductPageSet(
+        supabase,
+        project.id,
+        generated.content
+      );
+    } catch (error: unknown) {
+      res.status(500).json({
+        error: errorMessage(error),
+        ai_usage: generated.aiUsage,
+      });
+      return;
+    }
+
+    res.json(withAiUsageSafe({ productPageSet }, generated.aiUsage));
+  } catch (error: unknown) {
+    console.error("[api] Generate product page failed:", error);
+    res.status(500).json({ error: errorMessage(error) });
+  }
+}
+
+async function handleCreateProductPageTemplate(
+  req: express.Request,
+  res: express.Response
+): Promise<void> {
+  const { projectId } = req.body ?? {};
+
+  if (typeof projectId !== "string" || projectId.trim().length === 0) {
+    res.status(400).json({ error: "Missing or invalid 'projectId'." });
+    return;
+  }
+
+  let supabase: ReturnType<typeof getSupabase>;
+  try {
+    supabase = getSupabase();
+  } catch (error: unknown) {
+    res.status(500).json({ error: errorMessage(error) });
+    return;
+  }
+
+  try {
+    const { data: projectData, error: projectError } = await supabase
+      .from("projects")
+      .select("*")
+      .eq("id", projectId)
+      .single();
+
+    if (projectError || !projectData) {
+      res.status(404).json({
+        error: `Project not found: ${projectError?.message ?? projectId}`,
+      });
+      return;
+    }
+
+    const project = normalizeProject(projectData as ProductProject);
+
+    const [
+      { data: insightData },
+      { data: avatarData },
+      { data: desiresData },
+      { data: sourcesData },
+    ] = await Promise.all([
+      supabase
+        .from("research_insights")
+        .select("*")
+        .eq("project_id", project.id)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+      supabase
+        .from("generated_outputs")
+        .select("*")
+        .eq("project_id", project.id)
+        .eq("output_type", "customer_avatar")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+      supabase
+        .from("mass_desires")
+        .select("*")
+        .eq("project_id", project.id)
+        .order("sort_order", { ascending: true }),
+      supabase
+        .from("research_sources")
+        .select("*")
+        .eq("project_id", project.id)
+        .order("relevance_score", { ascending: false })
+        .limit(20),
+    ]);
+
+    const insight = insightData ? (insightData as ResearchInsight) : null;
+    const avatarOutput = avatarData as CustomerAvatarOutput | null;
+
+    const content = buildStarterProductPageContent({
+      project,
+      insight,
+      avatar: avatarOutput?.content_json ?? null,
+      desires: (desiresData ?? []) as MassDesire[],
+      sources: (sourcesData ?? []) as ResearchSource[],
+    });
+
+    const productPageSet = await saveProductPageSet(
+      supabase,
+      project.id,
+      content
+    );
+
+    res.json({ productPageSet });
+  } catch (error: unknown) {
+    console.error("[api] Create product page template failed:", error);
+    res.status(500).json({ error: errorMessage(error) });
+  }
+}
+
+async function handleGetProductPage(
+  req: express.Request,
+  res: express.Response
+): Promise<void> {
+  const projectId = req.query.projectId;
+
+  if (typeof projectId !== "string" || projectId.trim().length === 0) {
+    res.status(400).json({ error: "Missing or invalid 'projectId'." });
+    return;
+  }
+
+  let supabase: ReturnType<typeof getSupabase>;
+  try {
+    supabase = getSupabase();
+  } catch (error: unknown) {
+    res.status(500).json({ error: errorMessage(error) });
+    return;
+  }
+
+  const { data, error } = await supabase
+    .from("product_page_sets")
+    .select("*")
+    .eq("project_id", projectId.trim())
+    .maybeSingle();
+
+  if (error) {
+    if (isMissingProductPageTable(error.message, error.code)) {
+      res.json({ productPageSet: null });
+      return;
+    }
+    res.status(500).json({ error: error.message });
+    return;
+  }
+
+  if (!data) {
+    res.json({ productPageSet: null });
+    return;
+  }
+
+  res.json({
+    productPageSet: normalizeProductPageSet(data as Record<string, unknown>),
+  });
+}
+
+async function handlePatchProductPage(
+  req: express.Request,
+  res: express.Response
+): Promise<void> {
+  const setId = req.params.setId;
+  const body = req.body ?? {};
+  const sectionId =
+    typeof body.sectionId === "string" ? body.sectionId.trim() : "";
+  const patch =
+    body.patch && typeof body.patch === "object"
+      ? (body.patch as Partial<ProductPageSection>)
+      : null;
+
+  if (!setId?.trim()) {
+    res.status(400).json({ error: "Missing product page set id." });
+    return;
+  }
+
+  if (!sectionId) {
+    res.status(400).json({ error: "Missing 'sectionId'." });
+    return;
+  }
+
+  if (!patch) {
+    res.status(400).json({ error: "Missing 'patch' object." });
+    return;
+  }
+
+  let supabase: ReturnType<typeof getSupabase>;
+  try {
+    supabase = getSupabase();
+  } catch (error: unknown) {
+    res.status(500).json({ error: errorMessage(error) });
+    return;
+  }
+
+  const { data: existing, error: loadError } = await supabase
+    .from("product_page_sets")
+    .select("*")
+    .eq("id", setId)
+    .single();
+
+  if (loadError || !existing) {
+    res.status(404).json({
+      error: `Product page set not found: ${loadError?.message ?? setId}`,
+    });
+    return;
+  }
+
+  const current = normalizeProductPageSet(existing as Record<string, unknown>);
+  const nextContent = mergeProductPageSection(
+    current.content,
+    sectionId,
+    patch
+  );
+  const now = new Date().toISOString();
+
+  const { data: updated, error: updateError } = await supabase
+    .from("product_page_sets")
+    .update({
+      content: nextContent,
+      updated_at: now,
+    })
+    .eq("id", setId)
+    .select()
+    .single();
+
+  if (updateError || !updated) {
+    res.status(500).json({
+      error: updateError?.message ?? "Failed to update product page.",
+    });
+    return;
+  }
+
+  res.json({
+    productPageSet: normalizeProductPageSet(updated as Record<string, unknown>),
+  });
+}
+
+app.post("/api/product-page/create-template", handleCreateProductPageTemplate);
+app.post("/api/product-page/generate", handleGenerateProductPage);
+app.get("/api/product-page", handleGetProductPage);
+app.patch("/api/product-page/:setId", handlePatchProductPage);
+
+/* ==================================================================== */
 /* Ad candidates (selected, publishable ad units)                       */
 /* ==================================================================== */
 
@@ -2832,6 +3317,7 @@ app.delete("/api/projects/:projectId", async (req, res) => {
     "ad_candidates",
     "desire_concepts",
     "desire_concept_sets",
+    "product_page_sets",
     "creative_prompt_sets",
     "ad_copy_sets",
     "marketing_angles",

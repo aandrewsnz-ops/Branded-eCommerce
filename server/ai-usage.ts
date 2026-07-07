@@ -11,7 +11,8 @@ export type AiOperation =
   | "generate-copy"
   | "regenerate-ad"
   | "regenerate-image-prompt"
-  | "tof-concepts";
+  | "tof-concepts"
+  | "product-page";
 
 export interface NormalizedOpenAiUsage {
   input_tokens: number;

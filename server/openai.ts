@@ -252,7 +252,7 @@ export async function callOpenAIWithRetry(
 
   if (isTimeout) {
     throw new OpenAIUpstreamError(
-      "OpenAI request timed out while generating TOF concepts.",
+      `OpenAI request timed out (${label}).`,
       504,
       `Timed out after ${timeoutMs}ms.`
     );

@@ -58,6 +58,7 @@ const WORKFLOW_MODE_TO_USAGE_SECTION: Record<
   ads: "ads",
   view_ads: "ads",
   publish_ads: "ads",
+  product_page: "product_page",
   additional: "additional_content",
 };
 

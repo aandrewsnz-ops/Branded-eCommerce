@@ -17,6 +17,7 @@ export type WorkflowMode =
   | "ads"
   | "view_ads"
   | "publish_ads"
+  | "product_page"
   | "additional";
 
 export interface WorkflowModeDef {
@@ -33,6 +34,7 @@ export const WORKFLOW_MODES: readonly WorkflowModeDef[] = [
   { id: "ads", label: "Review Ads" },
   { id: "view_ads", label: "View Ads" },
   { id: "publish_ads", label: "Publish Ads" },
+  { id: "product_page", label: "Product Page" },
   { id: "additional", label: "Additional Content" },
 ] as const;
 

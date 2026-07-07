@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   fetchAdCandidates,
+  fetchProductPageSet,
   fetchLatestCustomerAvatar,
   fetchLatestInsight,
   fetchAdCopySets,
@@ -38,6 +39,10 @@ import type {
   GenerateDesiresResponse,
   GenerateInsightResponse,
   GenerateTofConceptsResponse,
+  ProductPageSection,
+  ProductPageSet,
+  CreateProductPageTemplateResponse,
+  UpdateProductPageResponse,
   MarketingAngle,
   MassDesire,
   ProductProject,
@@ -63,6 +68,12 @@ import {
 import { flattenFinalAds, flattenPublishAds } from "./lib/finalAds";
 import type { AiOperation } from "./lib/aiProgress";
 import { parseAiUsage } from "./lib/aiUsageFormat";
+import {
+  anglesErrorBannerMessage,
+  anglesErrorOverlayDetails,
+  anglesErrorOverlayStage,
+  parseAnglesGenerateError,
+} from "./lib/anglesGenerateErrors";
 import {
   copyErrorOverlayDetails,
   parseCopyGenerateError,
@@ -280,6 +291,13 @@ function App() {
   const [savingCandidateId, setSavingCandidateId] = useState<string | null>(
     null
   );
+
+  const [productPageSetByProject, setProductPageSetByProject] = useState<
+    Record<string, ProductPageSet | null>
+  >({});
+  const [isCreatingProductPageTemplate, setIsCreatingProductPageTemplate] =
+    useState(false);
+  const [productPageError, setProductPageError] = useState<string | null>(null);
 
   async function refreshProjectAiCostTotals() {
     try {
@@ -545,7 +563,8 @@ function App() {
       selectedId in copySetsByProject &&
       selectedId in creativePromptSetsByProject &&
       selectedId in conceptSetsByProject &&
-      selectedId in adCandidatesByProject
+      selectedId in adCandidatesByProject &&
+      selectedId in productPageSetByProject
     ) {
       return;
     }
@@ -568,6 +587,7 @@ function App() {
           conceptSets,
           creativePromptSets,
           adCandidates,
+          productPageSet,
         ] = await Promise.all([
           fetchMassDesires(selectedId),
           fetchMarketingAngles(selectedId),
@@ -575,6 +595,7 @@ function App() {
           fetchDesireConceptSets(selectedId),
           fetchCreativePromptSets(selectedId),
           fetchAdCandidates(selectedId),
+          fetchProductPageSet(selectedId),
         ]);
         if (cancelled) return;
         setDesiresByProject((prev) => ({ ...prev, [selectedId]: desires }));
@@ -591,6 +612,10 @@ function App() {
         setAdCandidatesByProject((prev) => ({
           ...prev,
           [selectedId]: adCandidates,
+        }));
+        setProductPageSetByProject((prev) => ({
+          ...prev,
+          [selectedId]: productPageSet,
         }));
       } catch (err: unknown) {
         if (cancelled) return;
@@ -621,6 +646,7 @@ function App() {
     conceptSetsByProject,
     creativePromptSetsByProject,
     adCandidatesByProject,
+    productPageSetByProject,
   ]);
 
   function updateField<K extends keyof ProductProjectInput>(
@@ -1050,11 +1076,29 @@ function App() {
       const payload: unknown = await res.json().catch(() => null);
 
       if (!res.ok) {
+        const structured = parseAnglesGenerateError(payload, res.status);
+        if (structured) {
+          failAiOverlay({
+            errorStage: anglesErrorOverlayStage(structured),
+            errorDetails: anglesErrorOverlayDetails(structured),
+          });
+          setAnglesError(anglesErrorBannerMessage(structured));
+          return;
+        }
+
         const message =
           payload && typeof payload === "object" && "error" in payload
             ? String((payload as { error: unknown }).error)
-            : `Marketing angles failed (HTTP ${res.status}).`;
-        throw new Error(message);
+            : res.status === 520
+              ? "The upstream request returned 520 with no body. The dev proxy may have timed out while the backend was still working."
+              : `Marketing angles failed (HTTP ${res.status}).`;
+
+        failAiOverlay({
+          errorStage: "unknown",
+          errorDetails: message,
+        });
+        setAnglesError(message);
+        return;
       }
 
       const data = payload as GenerateAnglesResponse;
@@ -1073,10 +1117,13 @@ function App() {
       );
       succeedAiOverlay(data.ai_usage ?? parseAiUsage(payload), projectId);
     } catch (err: unknown) {
-      dismissAiOverlay();
-      setAnglesError(
-        err instanceof Error ? err.message : "Marketing angles failed."
-      );
+      const message =
+        err instanceof Error ? err.message : "Marketing angles failed.";
+      failAiOverlay({
+        errorStage: "unknown",
+        errorDetails: message,
+      });
+      setAnglesError(message);
     } finally {
       setGeneratingAnglesId((current) =>
         current === projectId ? null : current
@@ -1677,6 +1724,76 @@ function App() {
     }
   }
 
+  async function handleCreateProductPageTemplate(projectId: string) {
+    setStatusMessage(null);
+    setProductPageError(null);
+    setIsCreatingProductPageTemplate(true);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/product-page/create-template`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId }),
+      });
+
+      const payload: unknown = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        const message =
+          payload && typeof payload === "object" && "error" in payload
+            ? String((payload as { error: unknown }).error)
+            : `Product page template creation failed (HTTP ${res.status}).`;
+        setProductPageError(message);
+        return;
+      }
+
+      const data = payload as CreateProductPageTemplateResponse;
+      setProductPageSetByProject((prev) => ({
+        ...prev,
+        [projectId]: data.productPageSet,
+      }));
+      setStatusMessage("Product page template created.");
+    } catch (err: unknown) {
+      setProductPageError(
+        err instanceof Error
+          ? err.message
+          : "Product page template creation failed."
+      );
+    } finally {
+      setIsCreatingProductPageTemplate(false);
+    }
+  }
+
+  async function handlePatchProductPageSection(
+    setId: string,
+    projectId: string,
+    sectionId: string,
+    patch: Partial<ProductPageSection>
+  ) {
+    setProductPageError(null);
+    const res = await fetch(`${API_BASE}/api/product-page/${setId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sectionId, patch }),
+    });
+
+    const payload: unknown = await res.json().catch(() => null);
+
+    if (!res.ok) {
+      const message =
+        payload && typeof payload === "object" && "error" in payload
+          ? String((payload as { error: unknown }).error)
+          : `Failed to update product page (HTTP ${res.status}).`;
+      throw new Error(message);
+    }
+
+    const data = payload as UpdateProductPageResponse;
+    setProductPageSetByProject((prev) => ({
+      ...prev,
+      [projectId]: data.productPageSet,
+    }));
+  }
+
   // Derived per-project data for the selected project.
   const sources = selectedId ? researchByProject[selectedId] ?? [] : [];
   const insight = selectedId ? insightByProject[selectedId] ?? null : null;
@@ -1693,6 +1810,9 @@ function App() {
   const adCandidates = selectedId
     ? adCandidatesByProject[selectedId] ?? []
     : [];
+  const productPageSet = selectedId
+    ? productPageSetByProject[selectedId] ?? null
+    : null;
 
   const finalAdCount = flattenFinalAds(desires, angles, copySets).length;
   const publishAdCount = flattenPublishAds(desires, angles, copySets).length;
@@ -1730,6 +1850,11 @@ function App() {
         : finalAdCount > 0
           ? "ready"
           : "missing",
+    product_page: productPageSet
+      ? "done"
+      : selectedProject
+        ? "ready"
+        : "missing",
     additional:
       copySets.length > 0 || creativePromptSets.length > 0 ? "ready" : "missing",
   };
@@ -1768,6 +1893,24 @@ function App() {
       conceptSets={conceptSets}
       creativePromptSets={creativePromptSets}
       adCandidates={adCandidates}
+      productPageSet={productPageSet}
+      isCreatingProductPageTemplate={isCreatingProductPageTemplate}
+      productPageError={productPageError}
+      onCreateProductPageTemplate={() => {
+        if (selectedProject)
+          void handleCreateProductPageTemplate(selectedProject.id);
+      }}
+      onPatchProductPageSection={(sectionId, patch) => {
+        if (!selectedProject || !productPageSet) {
+          return Promise.reject(new Error("No product page loaded."));
+        }
+        return handlePatchProductPageSection(
+          productPageSet.id,
+          selectedProject.id,
+          sectionId,
+          patch
+        );
+      }}
       isResearching={researchingId === selectedId}
       isSourcesLoading={sourcesLoadingId === selectedId}
       researchError={researchError}

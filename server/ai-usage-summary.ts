@@ -7,6 +7,7 @@ export type AiUsageSectionKey =
   | "customer_avatar"
   | "strategy"
   | "ads"
+  | "product_page"
   | "additional_content";
 
 export type WorkflowAiCostSummary = {
@@ -43,6 +44,7 @@ export const SECTION_OPERATIONS: Record<AiUsageSectionKey, readonly string[]> = 
     "mass-desires",
   ],
   ads: [],
+  product_page: ["product-page"],
   additional_content: ["creative-prompts"],
 };
 
@@ -56,6 +58,7 @@ const OPERATION_TO_SECTION: Record<string, AiUsageSectionKey> = {
   "regenerate-image-prompt": "strategy",
   "tof-concepts": "strategy",
   "mass-desires": "strategy",
+  "product-page": "product_page",
   "creative-prompts": "additional_content",
 };
 
@@ -75,6 +78,7 @@ function emptySections(): Record<AiUsageSectionKey, WorkflowAiCostSummary> {
     customer_avatar: emptySection("customer_avatar"),
     strategy: emptySection("strategy"),
     ads: emptySection("ads"),
+    product_page: emptySection("product_page"),
     additional_content: emptySection("additional_content"),
   };
 }

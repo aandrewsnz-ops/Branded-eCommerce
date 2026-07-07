@@ -1,4 +1,5 @@
 import {
+  LayoutTemplate,
   Search,
   FileText,
   Layers,
@@ -23,6 +24,7 @@ const MODE_ICONS: Record<WorkflowMode, typeof Search> = {
   ads: ImageIcon,
   view_ads: Eye,
   publish_ads: Send,
+  product_page: LayoutTemplate,
   additional: Archive,
 };
 

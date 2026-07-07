@@ -216,6 +216,7 @@ export type AiUsageSectionKey =
   | "customer_avatar"
   | "strategy"
   | "ads"
+  | "product_page"
   | "additional_content";
 
 export type WorkflowAiCostSummary = {
@@ -796,4 +797,133 @@ export interface UpsertAdCandidateResponse {
 
 export interface GetAdCandidatesResponse {
   candidates: AdCandidate[];
+}
+
+/* ------------------------------------------------------------------ */
+/* Product Page (Shopify Custom Liquid export)                        */
+/* ------------------------------------------------------------------ */
+
+export type ProductPageSectionType =
+  | "proof_intro"
+  | "ritual"
+  | "benefits_grid"
+  | "how_to_use"
+  | "social_proof"
+  | "comparison"
+  | "faq"
+  | "guarantee"
+  | "reviews"
+  | "care_disclaimer";
+
+export interface ProductPageFaqItem {
+  question: string;
+  answer: string;
+}
+
+export interface ProductPageDocumentLink {
+  label: string;
+  url: string;
+}
+
+export interface ProductPageCareItem {
+  title: string;
+  description: string;
+}
+
+export type ProductPageComparisonMark = "yes" | "no" | "partial";
+
+export interface ProductPageComparisonRow {
+  feature: string;
+  left_mark: ProductPageComparisonMark;
+  right_mark: ProductPageComparisonMark;
+}
+
+export interface ProductPageComparisonColumns {
+  left: string;
+  right: string;
+}
+
+export interface ProductPageBenefitItem {
+  title: string;
+  description: string;
+}
+
+export interface ProductPageStepItem {
+  title: string;
+  description: string;
+}
+
+export interface ProductPageTestimonial {
+  quote: string;
+  attribution: string;
+}
+
+export interface ProductPageSection {
+  id: string;
+  order: number;
+  section_type: ProductPageSectionType;
+  section_title: string;
+  shopify_section_name: string;
+  purpose: string;
+  headline: string;
+  accent_headline?: string;
+  proof_line?: string;
+  subheading?: string;
+  product_name?: string;
+  body_paragraphs: string[];
+  bullets: string[];
+  button_label?: string;
+  small_print?: string;
+  image_required: boolean;
+  image_role?: string;
+  image_prompt: string;
+  image_filename: string;
+  shopify_image_url: string;
+  image_alt?: string;
+  image_url?: string | null;
+  image_path?: string | null;
+  image_uploaded_at?: string | null;
+  image_file_type?: string | null;
+  custom_liquid: string;
+  faq_items?: ProductPageFaqItem[];
+  benefit_items?: ProductPageBenefitItem[];
+  steps?: ProductPageStepItem[];
+  comparison_left_title?: string;
+  comparison_right_title?: string;
+  comparison_left_bullets?: string[];
+  comparison_right_bullets?: string[];
+  comparison_rows?: ProductPageComparisonRow[];
+  comparison_columns?: ProductPageComparisonColumns;
+  care_items?: ProductPageCareItem[];
+  document_links?: ProductPageDocumentLink[];
+  testimonials?: ProductPageTestimonial[];
+  footer_line?: string;
+}
+
+export interface ProductPageContent {
+  page_title: string;
+  page_strategy: string;
+  sections: ProductPageSection[];
+}
+
+export interface ProductPageSet {
+  id: string;
+  project_id: string;
+  content: ProductPageContent;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GenerateProductPageResponse {
+  productPageSet: ProductPageSet;
+  ai_usage?: AiUsageSummary;
+}
+
+export interface CreateProductPageTemplateResponse {
+  productPageSet: ProductPageSet;
+}
+
+export interface UpdateProductPageResponse {
+  productPageSet: ProductPageSet;
 }

@@ -11,11 +11,14 @@ import type {
   MarketingAngle,
   ProductProject,
   ProductProjectInput,
+  ProductPageContent,
+  ProductPageSet,
   ResearchInsight,
   ResearchSource,
 } from "../types";
 import type { ProductProjectUpdate } from "./projectSetupFields";
 import { sanitizeYourStoreLogoFields } from "./projectSetupFields";
+import { hydrateProductPageContent } from "./productPageLiquid";
 
 /**
  * Supabase client for project persistence.
@@ -541,4 +544,38 @@ export async function fetchAdCandidates(
   }
 
   return ((data ?? []) as AdCandidate[]).map(normalizeAdCandidate);
+}
+
+/** Latest saved product page set for a project, or null. */
+export async function fetchProductPageSet(
+  projectId: string
+): Promise<ProductPageSet | null> {
+  if (!supabase) {
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from("product_page_sets")
+    .select("*")
+    .eq("project_id", projectId)
+    .maybeSingle();
+
+  if (error) {
+    if (import.meta.env.DEV) {
+      console.warn("[supabase] fetchProductPageSet:", error.message);
+    }
+    return null;
+  }
+
+  if (!data) return null;
+
+  const row = data as ProductPageSet;
+  const content = hydrateProductPageContent(
+    row.content as ProductPageContent
+  );
+
+  return {
+    ...row,
+    content,
+  };
 }
