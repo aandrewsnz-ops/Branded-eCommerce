@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertCircle, CheckCircle2, Loader2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, Loader2, X } from "lucide-react";
 import {
   AI_OPERATION_CONFIG,
   formatElapsed,
@@ -15,7 +15,7 @@ import {
 } from "../lib/aiUsageFormat";
 import type { AiUsageSummary } from "../types";
 
-export type AiOverlayStatus = "running" | "success" | "error";
+export type AiOverlayStatus = "running" | "success" | "error" | "cancelled";
 
 export interface AiProgressOverlayProps {
   operation: AiOperation;
@@ -25,6 +25,7 @@ export interface AiProgressOverlayProps {
   errorStage?: AiFailureStage | null;
   errorDetails?: string | null;
   onContinue?: () => void;
+  onCancel?: () => void;
 }
 
 export function AiProgressOverlay({
@@ -35,11 +36,13 @@ export function AiProgressOverlay({
   errorStage = null,
   errorDetails = null,
   onContinue,
+  onCancel,
 }: AiProgressOverlayProps) {
   const [tick, setTick] = useState(() => Date.now());
   const isRunning = status === "running";
   const isError = status === "error";
   const isSuccess = status === "success";
+  const isCancelled = status === "cancelled";
 
   useEffect(() => {
     if (!isRunning) return;
@@ -76,22 +79,27 @@ export function AiProgressOverlay({
     "ai-progress-overlay",
     isSuccess ? "is-success" : "",
     isError ? "is-error" : "",
+    isCancelled ? "is-cancelled" : "",
   ]
     .filter(Boolean)
     .join(" ");
 
   const title = isRunning
     ? config.title
-    : isError
-      ? (config.errorTitle ?? `${config.title} failed`)
-      : config.successTitle;
+    : isCancelled
+      ? "Cancelled"
+      : isError
+        ? (config.errorTitle ?? `${config.title} failed`)
+        : config.successTitle;
 
   const description = isRunning
     ? config.description
-    : isError
-      ? (errorDetails?.trim() ||
-          "The research request failed before results could be saved.")
-      : "The AI response was received, validated, and saved.";
+    : isCancelled
+      ? "Marketing angle generation was cancelled. Existing saved angles were not changed."
+      : isError
+        ? (errorDetails?.trim() ||
+            "The research request failed before results could be saved.")
+        : "The AI response was received, validated, and saved.";
 
   return (
     <div
@@ -115,6 +123,13 @@ export function AiProgressOverlay({
               size={22}
               strokeWidth={2}
               className="ai-progress-error-icon"
+              aria-hidden
+            />
+          ) : isCancelled ? (
+            <X
+              size={22}
+              strokeWidth={2}
+              className="ai-progress-cancelled-icon"
               aria-hidden
             />
           ) : (
@@ -220,6 +235,17 @@ export function AiProgressOverlay({
 
             <footer className="ai-progress-foot">
               <p>Do not refresh this page while the request is running.</p>
+              {operation === "marketing_angles" && onCancel ? (
+                <div className="ai-progress-actions ai-progress-actions-running">
+                  <button
+                    type="button"
+                    className="btn btn-secondary ai-progress-cancel"
+                    onClick={onCancel}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : null}
               <p className="ai-progress-debug">
                 Operation: {operation.replace(/_/g, "-")} · Estimated max:{" "}
                 {maxSeconds}s
@@ -228,6 +254,18 @@ export function AiProgressOverlay({
           </>
         ) : (
           <>
+            {isCancelled ? (
+              <div className="ai-progress-actions">
+                <button
+                  type="button"
+                  className="btn btn-primary ai-progress-continue"
+                  onClick={onContinue}
+                >
+                  Continue
+                </button>
+              </div>
+            ) : (
+              <>
             <div className="ai-progress-usage" role="status">
               {hasUsage ? (
                 <dl className="ai-progress-usage-grid">
@@ -293,6 +331,8 @@ export function AiProgressOverlay({
                 {usage?.operation ? ` · API: ${usage.operation}` : ""}
               </p>
             </footer>
+              </>
+            )}
           </>
         )}
       </div>

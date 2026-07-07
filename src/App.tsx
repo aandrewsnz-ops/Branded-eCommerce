@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   fetchAdCandidates,
   fetchProductPageSet,
@@ -16,6 +16,7 @@ import {
   updateDesireConceptCopy,
   updateProject,
   isSupabaseConfigured,
+  SUPABASE_CONFIG_ERROR,
 } from "./lib/supabase";
 import type { AdCopyDraft } from "./lib/saveFinalAdCopy";
 import type {
@@ -57,7 +58,6 @@ import type {
   ProjectAiUsageSummary,
   AiUsageSummary,
 } from "./types";
-import { normalizeProject } from "./types";
 import { AppShell } from "./components/AppShell";
 import { CopyPackModal } from "./components/CopyPackModal";
 import { TofConceptModal } from "./components/TofConceptModal";
@@ -106,55 +106,6 @@ const EMPTY_FORM: ProductProjectInput = {
   your_store_url: "",
 };
 
-const SAMPLE_PROJECTS: ProductProject[] = [
-  {
-    id: "sample-1",
-    our_product_name: "PostureFix Pro",
-    supplier_product_url: "https://supplier.example.com/posture-corrector",
-    supplier_product_description:
-      "An adjustable posture corrector brace that gently pulls the shoulders back to retrain alignment over time. Breathable, lightweight, and worn under clothing.",
-    primary_competitor_url: "https://example.com/posture-corrector",
-    additional_competitor_urls: "",
-    closest_competitor_product_description:
-      "A neoprene posture support brace marketed for desk workers with adjustable straps.",
-    target_country: "United States",
-    cost_price_including_shipping: "$11.50",
-    planned_sale_price: "$39.99",
-    current_offer: "Buy 1 Get 1 50% off + free shipping",
-    initial_problem_hypothesis: "Chronic slouching and back pain from sitting all day",
-    initial_customer_hypothesis:
-      "Office workers aged 30-55 with back and neck pain",
-    preferred_tone: "Confident, supportive, science-aware",
-    created_at: "2026-06-01T09:00:00.000Z",
-  },
-  {
-    id: "sample-2",
-    our_product_name: "AquaGlow LED Mirror",
-    supplier_product_url: "https://supplier.example.com/led-mirror",
-    supplier_product_description:
-      "A rechargeable LED vanity mirror with adjustable warm-to-cool lighting and touch dimming. Cordless and portable for makeup and skincare routines.",
-    primary_competitor_url: "https://example.com/led-mirror",
-    additional_competitor_urls: "",
-    closest_competitor_product_description:
-      "A ring-light vanity mirror with three light modes sold for makeup application.",
-    target_country: "United Kingdom",
-    cost_price_including_shipping: "£8.20",
-    planned_sale_price: "£29.95",
-    current_offer: "20% off launch discount",
-    initial_problem_hypothesis: "Poor bathroom lighting makes makeup application uneven",
-    initial_customer_hypothesis: "Women aged 18-40 into beauty and skincare",
-    preferred_tone: "Aesthetic, aspirational, clean",
-    created_at: "2026-06-05T14:30:00.000Z",
-  },
-];
-
-function createId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return crypto.randomUUID();
-  }
-  return `project-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
 type AiOverlaySession = {
   operation: AiOperation;
   status: AiOverlayStatus;
@@ -166,12 +117,9 @@ type AiOverlaySession = {
 };
 
 function App() {
-  const [projects, setProjects] = useState<ProductProject[]>(
-    isSupabaseConfigured ? [] : SAMPLE_PROJECTS
-  );
-  const [selectedId, setSelectedId] = useState<string | null>(
-    isSupabaseConfigured ? null : SAMPLE_PROJECTS[0]?.id ?? null
-  );
+  const anglesAbortRef = useRef<AbortController | null>(null);
+  const [projects, setProjects] = useState<ProductProject[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [form, setForm] = useState<ProductProjectInput>(EMPTY_FORM);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(isSupabaseConfigured);
@@ -348,6 +296,8 @@ function App() {
 
   useEffect(() => {
     if (!isSupabaseConfigured) {
+      setIsLoading(false);
+      setError(SUPABASE_CONFIG_ERROR);
       return;
     }
 
@@ -666,15 +616,7 @@ function App() {
     setError(null);
 
     if (!isSupabaseConfigured) {
-      const sanitized = sanitizeSetupUpdate(form);
-      const localProject: ProductProject = normalizeProject({
-        ...sanitized,
-        id: createId(),
-        created_at: new Date().toISOString(),
-      } as ProductProject);
-      setProjects((prev) => [localProject, ...prev]);
-      setSelectedId(localProject.id);
-      setForm(EMPTY_FORM);
+      setError(SUPABASE_CONFIG_ERROR);
       return;
     }
 
@@ -725,24 +667,15 @@ function App() {
     setSetupError(null);
     setIsSavingSetup(true);
 
+    if (!isSupabaseConfigured) {
+      setSetupError(SUPABASE_CONFIG_ERROR);
+      setIsSavingSetup(false);
+      return;
+    }
+
     const sanitized = sanitizeSetupUpdate(patch);
 
     try {
-      if (!isSupabaseConfigured) {
-        setProjects((prev) =>
-          prev.map((project) =>
-            project.id === projectId
-              ? normalizeProject({
-                  ...project,
-                  ...sanitized,
-                } as ProductProject)
-              : project
-          )
-        );
-        setStatusMessage("Setup saved.");
-        return;
-      }
-
       const saved = await updateProject(projectId, sanitized);
 
       setProjects((prev) =>
@@ -777,11 +710,9 @@ function App() {
       forgetProjectData(projectId);
     };
 
-    // Local-only mode (no Supabase): just drop it from memory.
     if (!isSupabaseConfigured) {
-      finishLocalCleanup();
+      setError(SUPABASE_CONFIG_ERROR);
       setDeletingProjectId(null);
-      setStatusMessage("Project deleted.");
       return;
     }
 
@@ -859,6 +790,35 @@ function App() {
 
   function dismissAiOverlay() {
     setAiOverlaySession(null);
+  }
+
+  function cancelAiOverlay() {
+    setAiOverlaySession((prev) =>
+      prev?.status === "running"
+        ? {
+            ...prev,
+            status: "cancelled",
+            usage: null,
+            errorStage: null,
+            errorDetails: null,
+          }
+        : prev
+    );
+  }
+
+  function handleCancelAnglesGeneration() {
+    anglesAbortRef.current?.abort();
+    anglesAbortRef.current = null;
+    console.info("[ANGLES] user cancelled generation request");
+    cancelAiOverlay();
+    setGeneratingAnglesId(null);
+  }
+
+  function isAbortError(err: unknown): boolean {
+    return (
+      (err instanceof DOMException && err.name === "AbortError") ||
+      (err instanceof Error && err.name === "AbortError")
+    );
   }
 
   async function handleRunResearch(projectId: string) {
@@ -1061,19 +1021,32 @@ function App() {
   }
 
   async function handleGenerateAngles(projectId: string) {
+    if (generatingAnglesId != null) {
+      return;
+    }
+
     setStatusMessage(null);
     setAnglesError(null);
     setGeneratingAnglesId(projectId);
     beginAiOverlay("marketing_angles", `marketing_angles-${projectId}`);
+
+    anglesAbortRef.current?.abort();
+    const controller = new AbortController();
+    anglesAbortRef.current = controller;
 
     try {
       const res = await fetch(`${API_BASE}/api/angles/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ projectId }),
+        signal: controller.signal,
       });
 
       const payload: unknown = await res.json().catch(() => null);
+
+      if (controller.signal.aborted) {
+        return;
+      }
 
       if (!res.ok) {
         const structured = parseAnglesGenerateError(payload, res.status);
@@ -1117,6 +1090,9 @@ function App() {
       );
       succeedAiOverlay(data.ai_usage ?? parseAiUsage(payload), projectId);
     } catch (err: unknown) {
+      if (isAbortError(err)) {
+        return;
+      }
       const message =
         err instanceof Error ? err.message : "Marketing angles failed.";
       failAiOverlay({
@@ -1125,6 +1101,9 @@ function App() {
       });
       setAnglesError(message);
     } finally {
+      if (anglesAbortRef.current === controller) {
+        anglesAbortRef.current = null;
+      }
       setGeneratingAnglesId((current) =>
         current === projectId ? null : current
       );
@@ -2009,6 +1988,12 @@ function App() {
           errorStage={aiOverlaySession.errorStage}
           errorDetails={aiOverlaySession.errorDetails}
           onContinue={dismissAiOverlay}
+          onCancel={
+            aiOverlaySession.operation === "marketing_angles" &&
+            aiOverlaySession.status === "running"
+              ? handleCancelAnglesGeneration
+              : undefined
+          }
         />
       ) : null}
       {copyModal ? (

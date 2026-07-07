@@ -20,6 +20,7 @@ import type { ModeStatus, WorkflowMode } from "./workflow";
 import { WorkflowNav } from "./WorkflowNav";
 import { ThemeSelector } from "./ThemeSelector";
 import { formatAiCost } from "../lib/aiUsageFormat";
+import { isSupabaseConfigured, SUPABASE_CONFIG_ERROR } from "../lib/supabase";
 
 interface LeftRailProps {
   projects: ProductProject[];
@@ -151,6 +152,7 @@ export function LeftRail({
           <button
             type="button"
             className="btn btn-secondary btn-xs"
+            disabled={!isSupabaseConfigured}
             onClick={() => setShowForm((open) => !open)}
           >
             {showForm ? <X size={13} /> : <Plus size={13} />}
@@ -158,14 +160,22 @@ export function LeftRail({
           </button>
         </div>
 
+        {!isSupabaseConfigured ? (
+          <div className="banner banner-error" role="alert">
+            <AlertTriangle size={14} />
+            <span>{SUPABASE_CONFIG_ERROR}</span>
+          </div>
+        ) : null}
+
+        {createError && isSupabaseConfigured ? (
+          <div className="banner banner-error" role="alert">
+            <AlertTriangle size={14} />
+            <span>{createError}</span>
+          </div>
+        ) : null}
+
         {showForm ? (
           <form className="brief-form" onSubmit={handleSubmit}>
-            {createError ? (
-              <div className="banner banner-error" role="alert">
-                <AlertTriangle size={14} />
-                <span>{createError}</span>
-              </div>
-            ) : null}
             <p className="brief-form-section-label">Your store branding</p>
             <p className="brief-form-section-hint">
               Optional. Used later for ad previews — not in research prompts.

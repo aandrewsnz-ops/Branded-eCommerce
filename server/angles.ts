@@ -22,7 +22,7 @@ import { type AiUsageSummary } from "./ai-usage";
 
 export const EXPECTED_ANGLES_PER_DESIRE = 5;
 
-const ANGLES_TARGET_MAX_PROMPT_CHARS = 12_000;
+const ANGLES_TARGET_PROMPT_CHARS = 12_000;
 
 const INTENSITY_RANK: Record<string, number> = {
   high: 3,
@@ -30,91 +30,148 @@ const INTENSITY_RANK: Record<string, number> = {
   low: 1,
 };
 
-function truncate(text: string, max: number): string {
+/** Safely take the first N items from an array. */
+function takeTop<T>(items: T[] | null | undefined, count: number): T[] {
+  if (!Array.isArray(items) || count <= 0) return [];
+  return items.slice(0, count);
+}
+
+/** Truncate long strings to keep prompts within token limits. */
+function truncateText(text: string, max: number): string {
   const trimmed = text.trim();
   if (trimmed.length <= max) return trimmed;
   return `${trimmed.slice(0, max - 1).trimEnd()}…`;
+}
+
+function projectField(
+  primary: string | undefined,
+  fallback: string | undefined,
+  max?: number
+): string {
+  const value = (primary?.trim() || fallback?.trim() || "").trim();
+  return max ? truncateText(value, max) : value;
 }
 
 function rankPainCluster(cluster: PainCluster): number {
   return INTENSITY_RANK[cluster.emotional_intensity] ?? 1;
 }
 
-function compactMassDesire(desire: MassDesire): Record<string, string> {
+function compactInsightContext(insight: ResearchInsight): Record<string, unknown> {
+  const pain_clusters = takeTop(
+    [...(insight.pain_clusters ?? [])].sort(
+      (a, b) => rankPainCluster(b) - rankPainCluster(a)
+    ),
+    3
+  ).map((cluster) => ({
+    name: truncateText(cluster.name, 80),
+    description: truncateText(cluster.description, 160),
+    emotional_intensity: cluster.emotional_intensity,
+  }));
+
+  const language_patterns = takeTop(insight.language_patterns, 5).map(
+    (pattern) => ({
+      pattern: truncateText(pattern.pattern, 100),
+      meaning: truncateText(pattern.meaning, 100),
+    })
+  );
+
+  const emotional_states = takeTop(insight.emotional_states, 3).map((state) => ({
+    state: truncateText(state.state, 80),
+    description: truncateText(state.description, 120),
+  }));
+
+  const failed_solutions = takeTop(insight.failed_solutions, 3).map(
+    (solution) => ({
+      solution: truncateText(solution.solution, 80),
+      why_it_failed: truncateText(solution.why_it_failed, 120),
+    })
+  );
+
   return {
-    id: desire.id,
-    desire_statement: desire.desire_statement,
-    audience_segment: desire.audience_segment,
-    emotional_driver: desire.emotional_driver,
-    what_they_are_really_buying: desire.what_they_are_really_buying,
-    pain_it_moves_away_from: desire.pain_it_moves_away_from,
-    positive_outcome_it_moves_toward: desire.positive_outcome_it_moves_toward,
-    copy_direction: desire.copy_direction,
-  };
-}
-
-/** Compact research + avatar + desire context to keep prompts under token limits. */
-function buildCompactAnglesContext(
-  insight: ResearchInsight,
-  avatar: CustomerAvatarContent,
-  massDesires: MassDesire[]
-): Record<string, unknown> {
-  const pain_clusters = [...(insight.pain_clusters ?? [])]
-    .sort((a, b) => rankPainCluster(b) - rankPainCluster(a))
-    .slice(0, 3)
-    .map((cluster) => ({
-      name: cluster.name,
-      description: truncate(cluster.description, 200),
-      emotional_intensity: cluster.emotional_intensity,
-    }));
-
-  const language_patterns = (insight.language_patterns ?? [])
-    .slice(0, 5)
-    .map((pattern) => ({
-      pattern: truncate(pattern.pattern, 120),
-      meaning: truncate(pattern.meaning, 120),
-      copywriting_use: truncate(pattern.copywriting_use, 120),
-    }));
-
-  const emotional_states = (insight.emotional_states ?? [])
-    .slice(0, 3)
-    .map((state) => ({
-      state: state.state,
-      description: truncate(state.description, 150),
-      trigger_moments: (state.trigger_moments ?? [])
-        .slice(0, 2)
-        .map((moment) => truncate(moment, 80)),
-    }));
-
-  const failed_solutions = (insight.failed_solutions ?? [])
-    .slice(0, 3)
-    .map((solution) => ({
-      solution: truncate(solution.solution, 100),
-      why_it_failed: truncate(solution.why_it_failed, 150),
-      market_belief: truncate(solution.market_belief, 120),
-    }));
-
-  const hopes = (insight.hopes ?? []).slice(0, 3).map((hope) => truncate(hope, 120));
-  const fears = (insight.fears ?? []).slice(0, 3).map((fear) => truncate(fear, 120));
-
-  const avatar_language_phrases = (avatar.language_bank?.phrases_they_use ?? [])
-    .slice(0, 5)
-    .map((phrase) => truncate(phrase, 120));
-
-  const context: Record<string, unknown> = {
     pain_clusters,
     language_patterns,
     emotional_states,
     failed_solutions,
-    hopes,
-    fears,
-    avatar_language_phrases,
+    hopes: takeTop(insight.hopes, 3).map((hope) => truncateText(hope, 100)),
+    fears: takeTop(insight.fears, 3).map((fear) => truncateText(fear, 100)),
+  };
+}
+
+function compactAvatarContext(
+  avatar: CustomerAvatarContent
+): Record<string, unknown> {
+  return {
+    language_phrases: takeTop(avatar.language_bank?.phrases_they_use, 5).map(
+      (phrase) => truncateText(phrase, 100)
+    ),
+  };
+}
+
+function compactMassDesireContext(desire: MassDesire): Record<string, string> {
+  return {
+    id: desire.id,
+    desire_statement: truncateText(desire.desire_statement, 200),
+    audience_segment: truncateText(desire.audience_segment, 100),
+    emotional_driver: truncateText(desire.emotional_driver, 100),
+    what_they_are_really_buying: truncateText(
+      desire.what_they_are_really_buying,
+      120
+    ),
+    pain_it_moves_away_from: truncateText(desire.pain_it_moves_away_from, 120),
+    positive_outcome_it_moves_toward: truncateText(
+      desire.positive_outcome_it_moves_toward,
+      120
+    ),
+    copy_direction: truncateText(desire.copy_direction, 120),
+  };
+}
+
+function compactProductContext(project: ProductProject): Record<string, string> {
+  return {
+    product_name: projectField(
+      project.product_name,
+      project.our_product_name,
+      100
+    ),
+    product_description: projectField(
+      project.product_description,
+      project.supplier_product_description,
+      300
+    ),
+    target_country: project.target_country,
+    target_customer: projectField(
+      project.target_customer,
+      project.initial_customer_hypothesis,
+      160
+    ),
+    main_problem: projectField(
+      project.main_problem,
+      project.initial_problem_hypothesis,
+      160
+    ),
+    offer: projectField(project.offer, project.current_offer, 100),
+    claims_allowed: truncateText(project.claims_allowed ?? "", 160),
+    claims_banned: truncateText(project.claims_banned ?? "", 160),
+    brand_tone: projectField(project.brand_tone, project.preferred_tone, 100),
+  };
+}
+
+function buildCompactPromptContext(
+  project: ProductProject,
+  insight: ResearchInsight,
+  avatar: CustomerAvatarContent,
+  massDesires: MassDesire[]
+): Record<string, unknown> {
+  const context: Record<string, unknown> = {
+    product: compactProductContext(project),
+    insight: compactInsightContext(insight),
+    avatar: compactAvatarContext(avatar),
   };
 
   if (massDesires.length === 1) {
-    context.mass_desire = compactMassDesire(massDesires[0]);
+    context.mass_desire = compactMassDesireContext(massDesires[0]);
   } else {
-    context.mass_desires = massDesires.map(compactMassDesire);
+    context.mass_desires = massDesires.map(compactMassDesireContext);
   }
 
   return context;
@@ -185,71 +242,37 @@ function buildPrompt(
   avatar: CustomerAvatarContent,
   massDesires: MassDesire[]
 ): string {
-  const compactContext = buildCompactAnglesContext(
+  const promptContext = buildCompactPromptContext(
+    project,
     insight,
     avatar,
     massDesires
   );
 
   return [
-    "You are a direct-response strategist creating marketing ANGLES —",
-    "distinct story frameworks for Meta ad creative strategy.",
+    "You are a direct-response strategist creating marketing ANGLES — distinct story frameworks for Meta ad creative strategy.",
     "",
-    "This is a CONVERSION-FIRST DRAFT. Aim for angles that could strongly convert,",
-    "not angles that are already publish-ready. A separate Compliance Check stage",
-    "will later score, flag, and recommend safer rewrites — so do NOT pre-remove",
-    "an angle simply because it may carry Meta risk.",
+    "This is a CONVERSION-FIRST DRAFT. A later Compliance Check stage will score and flag risk — do NOT pre-remove sharp angles.",
     "",
-    `For EACH of the ${massDesires.length} mass desires below, create EXACTLY`,
-    `${EXPECTED_ANGLES_PER_DESIRE} fundamentally different marketing angles.`,
-    "",
-    "Emotional intensity (encouraged):",
-    "- Allow sharper crisis points and more emotionally intense realisation moments.",
-    "- Allow angles built on embarrassment, comparison, avoidance, regret, social",
-    "  discomfort, photo anxiety, partner perception, ageing anxiety, money wasted,",
-    "  and frustration with failed solutions.",
-    "- Do NOT make every angle safe or bland.",
-    "- Keep angles plausible and grounded in the research.",
+    `For the mass desire(s) below, create EXACTLY ${EXPECTED_ANGLES_PER_DESIRE} fundamentally different marketing angles per desire.`,
     "",
     "Rules:",
-    "- Each angle must tell a different type of story.",
-    "- Each angle must have a different crisis point or realization moment.",
+    "- Each angle must tell a different story with a different crisis or realization moment.",
     "- Each angle must appeal to a different life circumstance or emotional context.",
-    "- Use real patterns from the compact research context and language phrases.",
+    "- Allow emotionally intense, plausible crisis points grounded in the compact research context.",
+    "- Use real language patterns and avatar phrases from the JSON context.",
     "- Do NOT write ad copy, hooks, or creative prompts.",
+    "- Do NOT invent testimonials, studies, statistics, certifications, or clinical proof.",
+    "- Do NOT claim the product cures, treats, reverses, or permanently fixes medical conditions.",
+    "- compliance_notes should be brief; do not dull the angle.",
     "",
-    "Truthfulness safeguards (always apply):",
-    "- Do NOT invent testimonials or present fictional stories as real customers.",
-    "- Do NOT fabricate studies, statistics, certifications, or guarantees.",
-    "- Do NOT invent clinical proof or create false product claims.",
-    "- Do NOT claim the product cures, treats, reverses, or permanently fixes",
-    "  medical conditions.",
-    "- compliance_notes is for the later Compliance Check stage — keep it brief;",
-    "  do not let it dull the angle.",
+    "Angle distinction test: could these 5 angles be 5 different people at a support group, each sharing a completely different discovery story?",
     "",
-    "Angle distinction test (for each desire's 5 angles):",
-    "Could these 5 angles be 5 different people at a support group, each sharing",
-    "a completely different story about how they discovered the same problem?",
-    "If two angles feel similar, rewrite them.",
-    "",
-    "You MUST return one angle_groups entry per mass desire, using the exact",
-    "mass_desire_id provided. Each group must contain exactly",
+    "Return one angle_groups entry per mass desire using the exact mass_desire_id. Each group must contain exactly",
     `${EXPECTED_ANGLES_PER_DESIRE} angles.`,
     "",
-    "Product context:",
-    `- product_name: ${truncate(project.product_name ?? project.our_product_name ?? "", 120)}`,
-    `- product_description: ${truncate(project.product_description ?? project.supplier_product_description ?? "", 400)}`,
-    `- target_country: ${project.target_country}`,
-    `- target_customer: ${truncate(project.target_customer ?? project.initial_customer_hypothesis ?? "", 200)}`,
-    `- main_problem: ${truncate(project.main_problem ?? project.initial_problem_hypothesis ?? "", 200)}`,
-    `- offer: ${truncate(project.offer ?? project.current_offer ?? "", 120)}`,
-    `- claims_allowed: ${truncate(project.claims_allowed ?? "", 200)}`,
-    `- claims_banned: ${truncate(project.claims_banned ?? "", 200)}`,
-    `- brand_tone: ${truncate(project.brand_tone ?? project.preferred_tone ?? "", 120)}`,
-    `- output_goal: ${truncate(project.output_goal ?? "", 120)}`,
-    "",
-    "Compact research and mass desire context (JSON):",
-    JSON.stringify(compactContext, null, 2),
+    "Compact context (JSON):",
+    JSON.stringify(promptContext),
     "",
     "Respond with VALID JSON ONLY (no markdown, no commentary) in exactly this shape:",
     "{",
@@ -366,14 +389,13 @@ export async function generateMarketingAngles(
   console.log("[ANGLES] prompt_chars before OpenAI call", {
     prompt_chars: input.length,
     mass_desire_count: massDesires.length,
-    target_max_prompt_chars: ANGLES_TARGET_MAX_PROMPT_CHARS,
-    over_target: input.length > ANGLES_TARGET_MAX_PROMPT_CHARS,
+    target_prompt_chars: ANGLES_TARGET_PROMPT_CHARS,
   });
 
-  if (input.length > ANGLES_TARGET_MAX_PROMPT_CHARS) {
-    console.warn("[ANGLES] prompt_chars exceeds target", {
+  if (input.length > ANGLES_TARGET_PROMPT_CHARS) {
+    console.warn("[ANGLES] Prompt still large", {
       prompt_chars: input.length,
-      target_max_prompt_chars: ANGLES_TARGET_MAX_PROMPT_CHARS,
+      target_prompt_chars: ANGLES_TARGET_PROMPT_CHARS,
     });
   }
 
@@ -381,6 +403,7 @@ export async function generateMarketingAngles(
     mass_desire_count: massDesires.length,
     prompt_chars: input.length,
   });
+  console.log("[ANGLES] retries disabled for cost control");
 
   let text: string;
   let summaries: AiUsageSummary[];
@@ -392,7 +415,7 @@ export async function generateMarketingAngles(
         client.responses.create({ model: OPENAI_MODEL, input }, { signal }),
       {
         timeoutMs: 240_000,
-        maxAttempts: 3,
+        maxAttempts: 1,
         usageContext: {
           operation: "marketing-angles",
           projectId: project.id,

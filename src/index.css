@@ -5655,6 +5655,20 @@ p {
   background: rgba(8, 10, 14, 0.82);
 }
 
+.ai-progress-overlay.is-cancelled {
+  background: rgba(8, 10, 14, 0.78);
+}
+
+.ai-progress-cancelled-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--text-muted);
+}
+
+.ai-progress-actions-running {
+  margin-top: 0.75rem;
+}
+
 .ai-progress-success-icon {
   flex-shrink: 0;
   margin-top: 2px;

@@ -21,6 +21,9 @@ export const AI_PROGRESS_MAX_SECONDS_RESEARCH = 240;
 /** Product page generation may include many sections. */
 export const AI_PROGRESS_MAX_SECONDS_PRODUCT_PAGE = 120;
 
+/** Marketing angles run per desire with a 240s backend timeout. */
+export const AI_PROGRESS_MAX_SECONDS_MARKETING_ANGLES = 240;
+
 export function getOperationMaxSeconds(operation: AiOperation): number {
   if (operation === "generate_copy") {
     return AI_PROGRESS_MAX_SECONDS_GENERATE_COPY;
@@ -30,6 +33,9 @@ export function getOperationMaxSeconds(operation: AiOperation): number {
   }
   if (operation === "product_page") {
     return AI_PROGRESS_MAX_SECONDS_PRODUCT_PAGE;
+  }
+  if (operation === "marketing_angles") {
+    return AI_PROGRESS_MAX_SECONDS_MARKETING_ANGLES;
   }
   return AI_PROGRESS_MAX_SECONDS;
 }
@@ -131,7 +137,10 @@ export const AI_OPERATION_CONFIG: Record<AiOperation, AiOperationConfig> = {
     description:
       "Creating distinct story-driven marketing angles for each mass desire.",
     reassurance:
-      "Angle generation produces multiple strategic directions — this can take a minute.",
+      "Angles are generated one mass desire at a time — each call may take up to 4 minutes.",
+    extendedWaitAfterSeconds: 90,
+    extendedWaitMessage:
+      "Still working. Each desire runs as a separate OpenAI call with up to a 4-minute timeout.",
     technicalDetail: "Multi-angle structured JSON generation",
     steps: [
       "Preparing desires and insight context",

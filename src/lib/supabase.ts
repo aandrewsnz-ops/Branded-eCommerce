@@ -24,8 +24,7 @@ import { hydrateProductPageContent } from "./productPageLiquid";
  * Supabase client for project persistence.
  *
  * Reads VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY from the environment.
- * If either is missing the app runs in local-only mode (no client is created)
- * and never throws, so a missing .env.local does not break the shell.
+ * If either is missing the client is not created and the app shows a config error.
  *
  * Only the public anon key is used here. Never put service-role keys or other
  * backend secrets in client-side code.
@@ -39,21 +38,40 @@ const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 /** True once both env vars are present. Used to gate all Supabase calls. */
 export const isSupabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey);
 
+export const SUPABASE_CONFIG_ERROR =
+  "Supabase is not configured. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to .env.local, then restart the dev server.";
+
+function maskSupabaseUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return "(invalid url)";
+  }
+}
+
+console.info("[supabase] configuration", {
+  configured: isSupabaseConfigured,
+  hasUrl: Boolean(supabaseUrl),
+  hasAnonKey: Boolean(supabaseAnonKey),
+  url: supabaseUrl ? maskSupabaseUrl(String(supabaseUrl)) : null,
+});
+
 export const supabase: SupabaseClient | null = isSupabaseConfigured
   ? createClient(supabaseUrl as string, supabaseAnonKey as string)
   : null;
 
-if (!isSupabaseConfigured && import.meta.env.DEV) {
-  console.info(
-    "[supabase] VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY not set. " +
-      "Running in local-only mode; projects will not be persisted."
-  );
+if (!isSupabaseConfigured) {
+  console.warn(`[supabase] ${SUPABASE_CONFIG_ERROR}`);
 }
 
 /** Fetch all projects, newest first. Throws on a Supabase error. */
 export async function fetchProjects(): Promise<ProductProject[]> {
+  console.info("[supabase] fetchProjects: starting");
+
   if (!supabase) {
-    throw new Error("Supabase is not configured.");
+    console.error("[supabase] fetchProjects: not configured");
+    throw new Error(SUPABASE_CONFIG_ERROR);
   }
 
   const { data, error } = await supabase
@@ -62,10 +80,18 @@ export async function fetchProjects(): Promise<ProductProject[]> {
     .order("created_at", { ascending: false });
 
   if (error) {
+    console.error("[supabase] fetchProjects: error", {
+      message: error.message,
+      code: (error as { code?: string }).code ?? null,
+    });
     throw new Error(error.message);
   }
 
-  return ((data ?? []) as ProductProject[]).map(normalizeProject);
+  const projects = ((data ?? []) as ProductProject[]).map(normalizeProject);
+  console.info("[supabase] fetchProjects: success", {
+    count: projects.length,
+  });
+  return projects;
 }
 
 function buildProjectPayload(

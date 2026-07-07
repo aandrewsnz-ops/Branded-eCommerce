@@ -20,6 +20,7 @@ import type {
   ResearchSource,
 } from "../types";
 import type { ProductProjectUpdate } from "../lib/projectSetupFields";
+import { isSupabaseConfigured, SUPABASE_CONFIG_ERROR } from "../lib/supabase";
 import type { ModeStatus, WorkflowMode } from "./workflow";
 import { LeftRail } from "./LeftRail";
 import { SetupWorkspace } from "./SetupWorkspace";
@@ -146,6 +147,15 @@ export function AppShell(props: AppShellProps) {
   const { selectedProject, mode, statusMessage } = props;
 
   function renderWorkspace() {
+    if (!isSupabaseConfigured) {
+      return (
+        <div className="empty-state">
+          <Boxes size={40} strokeWidth={1.5} />
+          <p>{SUPABASE_CONFIG_ERROR}</p>
+        </div>
+      );
+    }
+
     if (!selectedProject) {
       return (
         <div className="empty-state">
