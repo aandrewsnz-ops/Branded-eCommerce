@@ -20,7 +20,7 @@ create table if not exists ad_candidates (
     check (status in ('draft', 'ready', 'needs_revision')),
   notes text not null default '',
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),  
   unique (marketing_angle_id)
 );
 
